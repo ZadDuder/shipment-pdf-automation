@@ -1,0 +1,42 @@
+# This repository intentionally uses an allowlist. The workspace also contains
+# customer documents, credentials and production exports that must never be
+# committed.
+*
+
+!/.gitignore
+!/.gitmessage
+!/README.md
+!/CHANGELOG.md
+!/CLAUDE.md
+!/DEPLOY_HANDOFF.md
+!/SESSION_HANDOFF_2.md
+!/requirements.txt
+!/requirements-dev.txt
+!/pytest.ini
+!/final.json
+
+!/bot/
+/bot/*
+!/bot/*.py
+!/bot/requirements.txt
+!/bot/env.example
+!/bot/*.service
+
+!/пайтон скрипт/
+/пайтон скрипт/*
+!/пайтон скрипт/*.py
+
+!/tests/
+!/tests/**
+!/workflows/
+!/workflows/**
+!/scripts/
+!/scripts/**
+!/docs/
+!/docs/**
+!/.github/
+!/.github/**
+
+# Generated artifacts stay out even inside allowlisted source directories.
+**/__pycache__/
+**/*.py[cod]

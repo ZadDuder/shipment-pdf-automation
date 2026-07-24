@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram upload bot for shipment documents
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tg-upload-bot
+EnvironmentFile=/opt/tg-upload-bot/.env
+ExecStart=/opt/tg-upload-bot/.venv/bin/python /opt/tg-upload-bot/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

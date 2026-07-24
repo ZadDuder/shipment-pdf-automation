@@ -1,0 +1,2920 @@
+{
+  "name": "final",
+  "nodes": [
+    {
+      "parameters": {
+        "authentication": "privateKey",
+        "command": "={{ \"/opt/moil-venv/bin/python /data/moil/parse_moil_bundle.py --shipment-key \\\"\" + String($json.shipmentKey || \"\") + \"\\\" --input-dir \\\"\" + String($json.shipmentDir || \"\") + \"\\\"\" }}",
+        "cwd": "/data/moil"
+      },
+      "id": "2661cc69-6e34-43d5-8f5c-caaa6f7bb32a",
+      "name": "Call Python Parser",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        -2416,
+        480
+      ],
+      "credentials": {
+        "sshPrivateKey": {
+          "id": "ipw0NxJdl6eIz4Ml",
+          "name": "SSH Password account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst chatId = $('Start MOIL Processing').first().json.chatId ?? null;\nconst results = [];\n\nfor (const item of items) {\n  const stdout = item.json.stdout || '';\n  const stderr = item.json.stderr || '';\n  const code = item.json.code;\n\n  if (code !== 0) {\n    results.push({\n      json: {\n        error: 'Python script failed',\n        stderr,\n        code,\n        chatId,\n      }\n    });\n    continue;\n  }\n\n  try {\n    const parsed = JSON.parse(stdout);\n    results.push({\n      json: {\n        ...parsed,\n        chatId,\n      }\n    });\n  } catch (e) {\n    results.push({\n      json: {\n        error: 'Failed to parse Python output',\n        stdout,\n        parseError: e.message,\n        chatId,\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "c98971cd-c5ef-4bda-b2c8-df4e03ae587c",
+      "name": "Parse Python Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2192,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "documentId": {
+          "__rl": true,
+          "value": "1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k",
+          "mode": "list",
+          "cachedResultName": "moil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 2025675533,
+          "mode": "list",
+          "cachedResultName": "_master_catalog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k/edit#gid=2025675533"
+        },
+        "options": {}
+      },
+      "id": "56e67e41-0a14-4514-a0f0-cc0291982b34",
+      "name": "Read Master Catalog",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -1968,
+        480
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const pythonData = $('Parse Python Output').first().json;\nconst masterRows = $input.all().map((item) => item.json);\n\nif (!pythonData || !pythonData.invoiceRows) {\n  return [{\n    json: {\n      error: pythonData?.error || 'No Python data found',\n      chatId: pythonData?.chatId || null\n    }\n  }];\n}\n\nconst clean = (value) => String(value ?? '').trim();\n\nconst normalizeCode = (value) =>\n  clean(value).replace(/[^A-Z0-9-]/gi, '').toUpperCase();\n\nconst hasValue = (value) =>\n  value !== null && value !== undefined && value !== '';\n\nconst parseNumber = (value) => {\n  if (!hasValue(value)) return null;\n  const normalized = String(value).replace(/[^\\d,.-]/g, '').replace(/,/g, '');\n  const num = Number(normalized);\n  return Number.isFinite(num) ? num : null;\n};\n\nconst uniqSorted = (values) =>\n  [...new Set(values.filter((v) => hasValue(v)).map((v) => String(v)))]\n    .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));\n\nconst round2 = (value) =>\n  value === null || value === undefined ? null : Number(Number(value).toFixed(2));\n\nconst scalePackingBoxes = (boxes, scale = 1) => {\n  if (boxes === null || boxes === undefined) return null;\n  if (Number(boxes) === 0) return 0;\n  return Math.max(1, Math.round(Number(boxes) * Number(scale)));\n};\n\nconst countryMap = {\n  'израиль': 'Israel',\n  'israel': 'Israel',\n  'china': 'China',\n  'китай': 'China',\n  'usa': 'USA',\n  'u.s.a.': 'USA',\n  'сша': 'USA',\n};\n\nconst normalizeCountry = (value) => {\n  const raw = clean(value);\n  if (!raw) return '';\n  const key = raw.toLowerCase();\n  return countryMap[key] || raw;\n};\n\nconst gtinToText = (value) => {\n  if (value === null || value === undefined || value === '') return null;\n\n  if (typeof value === 'number' && Number.isFinite(value)) {\n    return String(Math.trunc(value));\n  }\n\n  const text = String(value).trim();\n\n  if (/^\\d+\\.0+$/.test(text)) {\n    return text.replace(/\\.0+$/, '');\n  }\n\n  const digits = text.replace(/\\D/g, '');\n  return digits || null;\n};\n\nconst detectMaster = (row) => {\n  const get = (...keys) => {\n    for (const key of keys) {\n      if (hasValue(row[key])) return row[key];\n    }\n    return null;\n  };\n\n  const textValues = Object.values(row)\n    .filter((value) => typeof value === 'string' && value.trim());\n\n  const translationHeuristic =\n    textValues.find((value) => /[А-ЯЁа-яё]{5,}/.test(value)) || null;\n\n  const packageHeuristic =\n    textValues.find((value) => /упаков|флакон|транспортн|группов|короб/i.test(String(value))) || null;\n\n  const itemNo = normalizeCode(\n    get(\n      'SKU',\n      'Item No.',\n      'itemNo',\n      'SKU Code - 2',\n      'SKU Code - 1',\n      'Артикул поставщика',\n      'Арт производителя',\n      'Артикул производителя',\n      'Vendor Code',\n      'ItemCode',\n      'SAP ItemCode'\n    )\n  );\n\n  const gtin = gtinToText(\n    get(\n      'Код товара',\n      'Barcode',\n      'BARCODE',\n      'GTIN',\n      'gtin',\n      'Штрихкод',\n      'Баркод',\n      'EAN'\n    )\n  );\n\n  if (!itemNo && !gtin) return null;\n\n  return {\n    itemNo: itemNo || null,\n    article: get(\n      'SKU RU',\n      'Артикул',\n      'АРТИКУЛ',\n      'article',\n      'Арт. Ру-Бьюти',\n      'Артикул РУ'\n    ),\n    gtin,\n    customsCode: get(\n      'Customs Code',\n      'Код ТНВЭД',\n      'Код ТНВЭД ',\n      'customsCode',\n      'Код ТНВЭД (13933)',\n      'ТНВЭД'\n    ),\n    translation: get(\n      'PRODUCT DESCRIPTION RU',\n      'Перевод',\n      'translation',\n      'Полное наименование товара (2478)',\n      'Наименование RU',\n      'Наименование'\n    ) || translationHeuristic || '',\n    packageDescription: get(\n      'PACKAGE DESCRIPTION RU',\n      'Пояснения к материалу и упаковке',\n      'ОПИСАНИЕ УПАКОВКИ',\n      'packageDescription',\n      'Пояснения к материалу и упаковке (для таможни)'\n    ) || packageHeuristic || '',\n    countryOfOrigin: normalizeCountry(\n      get(\n        'Country Of Origin',\n        'страна происхождения',\n        'countryOfOrigin',\n        'Страна происхождения'\n      )\n    ),\n    ds: get(\n      'Декларация о соответствии (23557)',\n      'ДС',\n      'СГР/деклация'\n    ),\n    dt: get(\n      'ДТ'\n    ),\n    tovar: get(\n      'ТОВАР',\n      'Товар'\n    ),\n    alcohol: get(\n      '% содержания спирта',\n      'Концентрация спирта',\n      'Alcohol',\n      'СПИРТ'\n    ),\n    dataMatrix: get(\n      'Data Matrix'\n    ),\n    label: get(\n      'этикетка',\n      'Этикетка'\n    ),\n  };\n};\n\nconst masterByItemNo = {};\nconst masterByGtin = {};\n\nfor (const row of masterRows) {\n  const normalized = detectMaster(row);\n  if (!normalized) continue;\n\n  if (normalized.itemNo) {\n    masterByItemNo[normalized.itemNo] = normalized;\n  }\n\n  if (normalized.gtin) {\n    masterByGtin[normalized.gtin] = normalized;\n  }\n}\n\nconst resolveMaster = ({ itemNo = null, gtin = null, batchBarcode = null } = {}) => {\n  const normalizedItemNo = itemNo ? normalizeCode(itemNo) : null;\n  const normalizedGtin = gtinToText(gtin);\n  const normalizedBatchBarcode = gtinToText(batchBarcode);\n\n  if (normalizedItemNo && masterByItemNo[normalizedItemNo]) {\n    return masterByItemNo[normalizedItemNo];\n  }\n\n  if (normalizedGtin && masterByGtin[normalizedGtin]) {\n    return masterByGtin[normalizedGtin];\n  }\n\n  if (normalizedBatchBarcode && masterByGtin[normalizedBatchBarcode]) {\n    return masterByGtin[normalizedBatchBarcode];\n  }\n\n  return null;\n};\n\nconst bundle = pythonData;\nconst hasAnyBatchFiles = Array.isArray(bundle.batchFiles) && bundle.batchFiles.length > 0;\n\nconst packingMap = {};\nfor (const row of bundle.packingRows || []) {\n  const normalizedCode = normalizeCode(row.itemNo);\n  if (!normalizedCode) continue;\n\n  if (!packingMap[normalizedCode]) {\n    packingMap[normalizedCode] = [];\n  }\n\n  packingMap[normalizedCode].push({\n    itemNo: normalizedCode,\n    boxes: parseNumber(row.boxes),\n    weight: parseNumber(row.weight),\n    quantity: parseNumber(row.quantity),\n    pallet: hasValue(row.pallet) ? String(row.pallet) : null,\n    sscc: hasValue(row.sscc) ? String(row.sscc) : null,\n    descriptionFromPacking: clean(row.descriptionFromPacking),\n    sourceFileName: row.__sourceFileName || null,\n    nestedInCb: row.nestedInCb ?? null,\n  });\n}\n\nconst batchMap = {};\nfor (const row of bundle.batchRows || []) {\n  const normalizedCode = normalizeCode(row.itemNo || row.sapItemCode || row['SAP ItemCode']);\n  if (!normalizedCode) continue;\n\n  if (!batchMap[normalizedCode]) {\n    batchMap[normalizedCode] = [];\n  }\n\n  batchMap[normalizedCode].push({\n    itemNo: normalizedCode,\n    wmsItemCode: clean(row.wmsItemCode),\n    itemFrgnName: clean(row.itemFrgnName),\n    quantity: parseNumber(row.quantity),\n    quantityUnit: clean(row.quantityUnit),\n    boxes: parseNumber(row.boxes),\n    pallet: hasValue(row.pallet) ? String(row.pallet) : null,\n    batchNo: clean(row.batchNo),\n    prodDate: clean(row.prodDate),\n    expDate: clean(row.expDate),\n    barcode: gtinToText(row.barcode),\n    sourceFileName: row.__sourceFileName || null,\n  });\n}\n\nconst rawInvoiceRows = [...(bundle.invoiceRows || [])]\n  .map((row, idx) => ({\n    ...row,\n    __rowOrder: hasValue(row.__rowOrder) ? Number(row.__rowOrder) : idx + 1,\n    __isComponent: Boolean(row.__isComponent) || row.itemIndex === null || row.itemIndex === undefined || row.itemIndex === '',\n  }))\n  .sort((a, b) => {\n    const aOrder = hasValue(a.__rowOrder) ? Number(a.__rowOrder) : 999999;\n    const bOrder = hasValue(b.__rowOrder) ? Number(b.__rowOrder) : 999999;\n    if (aOrder !== bOrder) return aOrder - bOrder;\n    return String(a.itemNo || '').localeCompare(String(b.itemNo || ''));\n  });\n\nconst invoiceAgg = {};\nfor (const row of rawInvoiceRows) {\n  if (row.__isComponent) continue;\n\n  const itemNo = normalizeCode(row.itemNo);\n  if (!itemNo) continue;\n\n  if (!invoiceAgg[itemNo]) {\n    invoiceAgg[itemNo] = {\n      itemNo,\n      itemIndexes: [],\n      description: clean(row.description),\n      countryOfOrigin: clean(row.countryOfOrigin),\n      quantity: 0,\n      discountPercentage: parseNumber(row.discountPercentage),\n      unitPriceBeforeDiscount: parseNumber(row.unitPriceBeforeDiscount),\n      unitPriceAfterDiscount: parseNumber(row.unitPriceAfterDiscount),\n      totalBeforeDiscount: 0,\n      totalPriceAfterDiscount: 0,\n      commercialDiscount: 0,\n      warnings: [],\n      __firstRowOrder: hasValue(row.__rowOrder) ? Number(row.__rowOrder) : 999999,\n    };\n  }\n\n  const target = invoiceAgg[itemNo];\n\n  if (hasValue(row.itemIndex)) {\n    target.itemIndexes.push(Number(row.itemIndex));\n  }\n\n  if (!target.description && row.description) {\n    target.description = clean(row.description);\n  }\n\n  if (!target.countryOfOrigin && row.countryOfOrigin) {\n    target.countryOfOrigin = clean(row.countryOfOrigin);\n  }\n\n  target.quantity += parseNumber(row.quantity) || 0;\n  target.totalBeforeDiscount += parseNumber(row.totalBeforeDiscount) || 0;\n  target.totalPriceAfterDiscount += parseNumber(row.totalPriceAfterDiscount) || 0;\n  target.commercialDiscount += parseNumber(row.commercialDiscount) || 0;\n\n  const priceBefore = parseNumber(row.unitPriceBeforeDiscount);\n  if (target.unitPriceBeforeDiscount === null || target.unitPriceBeforeDiscount === undefined) {\n    target.unitPriceBeforeDiscount = priceBefore;\n  } else if (priceBefore !== null && target.unitPriceBeforeDiscount !== priceBefore) {\n    target.warnings.push('разные unit price before в invoice');\n  }\n\n  const priceAfter = parseNumber(row.unitPriceAfterDiscount);\n  if (target.unitPriceAfterDiscount === null || target.unitPriceAfterDiscount === undefined) {\n    target.unitPriceAfterDiscount = priceAfter;\n  } else if (priceAfter !== null && target.unitPriceAfterDiscount !== priceAfter) {\n    target.warnings.push('разные unit price after в invoice');\n  }\n\n  const discount = parseNumber(row.discountPercentage);\n  if (target.discountPercentage === null || target.discountPercentage === undefined) {\n    target.discountPercentage = discount;\n  } else if (discount !== null && target.discountPercentage !== discount) {\n    target.warnings.push('разный discount % в invoice');\n  }\n}\n\nconst aggregatedMainRows = Object.values(invoiceAgg).sort((a, b) => {\n  if (a.__firstRowOrder !== b.__firstRowOrder) return a.__firstRowOrder - b.__firstRowOrder;\n  return String(a.itemNo).localeCompare(String(b.itemNo));\n});\n\nconst mainMap = {};\nfor (const row of aggregatedMainRows) {\n  mainMap[row.itemNo] = row;\n}\n\nconst displaySequence = [];\nconst emittedMain = new Set();\n\nfor (const row of rawInvoiceRows) {\n  const itemNo = normalizeCode(row.itemNo);\n  if (!itemNo) continue;\n\n  if (row.__isComponent) {\n    displaySequence.push({\n      type: 'component',\n      row,\n      itemNo,\n      rowOrder: hasValue(row.__rowOrder) ? Number(row.__rowOrder) : 999999,\n    });\n    continue;\n  }\n\n  if (!emittedMain.has(itemNo) && mainMap[itemNo]) {\n    emittedMain.add(itemNo);\n    displaySequence.push({\n      type: 'main',\n      row: mainMap[itemNo],\n      itemNo,\n      rowOrder: mainMap[itemNo].__firstRowOrder,\n    });\n  }\n}\n\nconst aggregatePackingTotals = (rows) => {\n  if (!rows.length) {\n    return {\n      quantity: null,\n      boxes: null,\n      weight: null,\n      pallets: [],\n    };\n  }\n\n  let quantity = 0;\n  let boxes = 0;\n  let weight = 0;\n\n  let hasQuantity = false;\n  let hasBoxes = false;\n  let hasWeight = false;\n\n  for (const row of rows) {\n    if (row.quantity !== null && row.quantity !== undefined) {\n      quantity += row.quantity;\n      hasQuantity = true;\n    }\n    if (row.boxes !== null && row.boxes !== undefined) {\n      boxes += row.boxes;\n      hasBoxes = true;\n    }\n    if (row.weight !== null && row.weight !== undefined) {\n      weight += row.weight;\n      hasWeight = true;\n    }\n  }\n\n  return {\n    quantity: hasQuantity ? quantity : null,\n    boxes: hasBoxes ? boxes : null,\n    weight: hasWeight ? weight : null,\n    pallets: uniqSorted(rows.map((row) => row.pallet)),\n  };\n};\n\nconst splitPackingByPallet = (rows) => {\n  const byPallet = {};\n\n  for (const row of rows) {\n    const palletKey = row.pallet || 'без паллеты';\n    if (!byPallet[palletKey]) {\n      byPallet[palletKey] = {\n        quantity: 0,\n        boxes: 0,\n        weight: 0,\n        hasQuantity: false,\n        hasBoxes: false,\n        hasWeight: false,\n      };\n    }\n\n    if (row.quantity !== null && row.quantity !== undefined) {\n      byPallet[palletKey].quantity += row.quantity;\n      byPallet[palletKey].hasQuantity = true;\n    }\n    if (row.boxes !== null && row.boxes !== undefined) {\n      byPallet[palletKey].boxes += row.boxes;\n      byPallet[palletKey].hasBoxes = true;\n    }\n    if (row.weight !== null && row.weight !== undefined) {\n      byPallet[palletKey].weight += row.weight;\n      byPallet[palletKey].hasWeight = true;\n    }\n  }\n\n  return Object.entries(byPallet)\n    .sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true }))\n    .map(([palletKey, totals]) => ({\n      palletKey,\n      quantity: totals.hasQuantity ? totals.quantity : null,\n      boxes: totals.hasBoxes ? totals.boxes : null,\n      weight: totals.hasWeight ? totals.weight : null,\n    }));\n};\n\nconst buildComponentCustomsRow = (row) => {\n  const itemNo = normalizeCode(row.itemNo);\n  const master = resolveMaster({ itemNo });\n  const masterMissing = !master;\n  const articleMissing = !hasValue(master?.article);\n  const translationMissing = !hasValue(master?.translation);\n  const packageMissing = !hasValue(master?.packageDescription);\n\n  const warnings = [];\n  if (masterMissing) warnings.push(`нет строки в справочнике для ${itemNo}`);\n  if (!masterMissing && articleMissing) warnings.push('пустой артикул в справочнике');\n  if (!masterMissing && translationMissing) warnings.push('пустой перевод в справочнике');\n  if (!masterMissing && packageMissing) warnings.push('пустые пояснения к материалу и упаковке');\n\n  return {\n    '#': null,\n    'Item No.': itemNo,\n    'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n    'Description': clean(row.description) || null,\n    'Перевод': master?.translation ?? '',\n    'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n    'Country Of Origin': master?.countryOfOrigin || normalizeCountry(row.countryOfOrigin),\n    'Quantity Количество': parseNumber(row.quantity),\n    'Unit Price Before Discount': null,\n    'Total Before Discount': null,\n    'Discount Percentage, %': null,\n    'Unit Price After Discount': null,\n    'Total,$': null,\n    'Commercial Discount, $': null,\n    'Количество коробок, шт.': null,\n    'Вес, кг': null,\n    '№ паллета': null,\n\n    '__row_warning': warnings.length > 0,\n    '__error_article': masterMissing || articleMissing,\n    '__error_qty': false,\n    '__warning_nested_cb': false,\n    '__warning_boxes_zero': false,\n    '__warning_boxes_missing': false,\n    '__warning_weight_zero': false,\n    '__warning_weight_missing': false,\n    '__warning_reason': warnings.join(' | ') || null,\n  };\n};\n\nconst buildComponentCzRows = (row) => {\n  const itemNo = normalizeCode(row.itemNo);\n  const master = resolveMaster({ itemNo });\n  const masterMissing = !master;\n  const articleMissing = !hasValue(master?.article);\n  const translationMissing = !hasValue(master?.translation);\n  const packageMissing = !hasValue(master?.packageDescription);\n  const customsCodeText = hasValue(master?.customsCode) ? String(master.customsCode).trim() : null;\n  const gtinText = gtinToText(master?.gtin);\n  const batchRowsForItem = batchMap[itemNo] || [];\n\n  const buildWarnings = (finalGtin) => {\n    const warnings = [];\n    if (masterMissing) warnings.push(`нет строки в справочнике для ${itemNo}`);\n    if (!masterMissing && articleMissing) warnings.push('пустой артикул в справочнике');\n    if (!masterMissing && translationMissing) warnings.push('пустой перевод в справочнике');\n    if (!masterMissing && packageMissing) warnings.push('пустые пояснения к материалу и упаковке');\n    if (!customsCodeText) warnings.push('не заполнен Код ТНВЭД');\n    if (hasAnyBatchFiles && !batchRowsForItem.length) warnings.push(`нет строки в batch для ${itemNo}`);\n    if (!finalGtin) warnings.push('не заполнен GTIN');\n    return warnings;\n  };\n\n  const makeRow = (batchRow) => {\n    const finalGtin = gtinText || (batchRow?.barcode) || null;\n    const rowWarnings = buildWarnings(finalGtin);\n    const baseQty = parseNumber(row.quantity) ?? 0;\n    const batchQty = batchRow ? batchRow.quantity : null;\n    const qty = batchQty ?? (baseQty || null);\n    const share = (baseQty && batchQty != null) ? batchQty / baseQty : null;\n\n    return {\n      '#': null,\n      'Item No.': itemNo,\n      'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n      'Код ТНВЭД': customsCodeText,\n      'GTIN': finalGtin ? `'${finalGtin}` : null,\n      'Description': clean(row.description) || null,\n      'Перевод': master?.translation ?? '',\n      'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n      'Country Of Origin': master?.countryOfOrigin || normalizeCountry(row.countryOfOrigin),\n      'Quantity Количество': qty,\n      'Unit Price Before Discount': null,\n      'Total Before Discount': null,\n      'Discount Percentage, %': null,\n      'Unit Price After Discount': null,\n      'Total,$': null,\n      'Commercial Discount, $': null,\n      'Количество коробок, шт.': null,\n      'Вес, кг': null,\n      '№ паллета': null,\n      'Batch No': batchRow?.batchNo || null,\n      'Prod. date': batchRow?.prodDate || null,\n      'Exp. Date': batchRow?.expDate || null,\n      'Data Matrix': master?.dataMatrix ?? null,\n      'этикетка': master?.label ?? null,\n      '% содержания спирта': master?.alcohol ?? null,\n      'ДС': master?.ds ?? null,\n      'ДТ': master?.dt ?? null,\n      'ТОВАР': master?.tovar || clean(row.description) || null,\n\n      '__row_warning': rowWarnings.length > 0,\n      '__error_article': masterMissing || articleMissing,\n      '__error_tnved': !customsCodeText,\n      '__error_gtin': !finalGtin,\n      '__warning_nested_cb': false,\n      '__warning_boxes_zero': false,\n      '__warning_boxes_missing': false,\n      '__warning_weight_zero': false,\n      '__warning_weight_missing': false,\n      '__warning_reason': rowWarnings.join(' | ') || null,\n    };\n  };\n\n  if (batchRowsForItem.length) {\n    return batchRowsForItem.map((b) => makeRow(b));\n  }\n  return [makeRow(null)];\n};\n\nconst customsRows = [];\nlet customsIndex = 1;\n\nfor (const entry of displaySequence) {\n  if (entry.type === 'component') {\n    customsRows.push(buildComponentCustomsRow(entry.row));\n    continue;\n  }\n\n  const invoiceRow = entry.row;\n  const itemNo = invoiceRow.itemNo;\n  const batchRows = batchMap[itemNo] || [];\n  const packingRows = packingMap[itemNo] || [];\n  const fallbackBatchBarcode = batchRows.find((r) => r.barcode)?.barcode || null;\n  const master = resolveMaster({ itemNo, batchBarcode: fallbackBatchBarcode });\n  const packingTotals = aggregatePackingTotals(packingRows);\n\n  const qtyScale = (packingTotals.quantity && invoiceRow.quantity !== null && invoiceRow.quantity !== undefined && Number(packingTotals.quantity) !== Number(invoiceRow.quantity))\n    ? Number(invoiceRow.quantity) / Number(packingTotals.quantity)\n    : 1;\n\n  const rowWarnings = [];\n\n  const masterMissing = !master;\n  const articleMissing = !hasValue(master?.article);\n  const translationMissing = !hasValue(master?.translation);\n  const packageMissing = !hasValue(master?.packageDescription);\n\n  const packingMissing = !packingRows.length;\n  const qtyMismatch =\n    packingTotals.quantity !== null &&\n    invoiceRow.quantity !== null &&\n    invoiceRow.quantity !== undefined &&\n    Number(packingTotals.quantity) !== Number(invoiceRow.quantity);\n\n  const hasNestedInCb = packingRows.some((r) => hasValue(r.nestedInCb));\n  const hasZeroBoxes = packingRows.some((r) => r.boxes === 0);\n  const hasMissingBoxes = packingRows.some((r) => r.boxes === null || r.boxes === undefined);\n  const hasZeroWeight = packingRows.some((r) => r.weight === 0);\n  const hasMissingWeight = packingRows.some((r) => r.weight === null || r.weight === undefined);\n\n  if (masterMissing) rowWarnings.push(`нет строки в справочнике для ${itemNo}`);\n  if (!masterMissing && articleMissing) rowWarnings.push('пустой артикул в справочнике');\n  if (!masterMissing && translationMissing) rowWarnings.push('пустой перевод в справочнике');\n  if (!masterMissing && packageMissing) rowWarnings.push('пустые пояснения к материалу и упаковке');\n  if (packingMissing) rowWarnings.push(`нет строки в packing для ${itemNo}`);\n  if (qtyMismatch) rowWarnings.push(`qty invoice=${invoiceRow.quantity}, packing=${packingTotals.quantity}`);\n  if (hasNestedInCb) rowWarnings.push('есть вложение IN CB');\n  if (hasZeroBoxes) rowWarnings.push('есть строка с boxes=0');\n  if (hasMissingBoxes) rowWarnings.push('есть строка без значения boxes');\n  if (hasZeroWeight) rowWarnings.push('есть строка с weight=0');\n  if (hasMissingWeight) rowWarnings.push('есть строка без значения weight');\n\n  const articleValue = hasValue(master?.article) ? String(master.article).trim() : null;\n\n  customsRows.push({\n    '#': customsIndex++,\n    'Item No.': itemNo,\n    'Артикул': articleValue,\n    'Description': invoiceRow.description || (packingRows[0]?.descriptionFromPacking ?? ''),\n    'Перевод': master?.translation ?? '',\n    'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n    'Country Of Origin': master?.countryOfOrigin || normalizeCountry(invoiceRow.countryOfOrigin),\n    'Quantity Количество': invoiceRow.quantity ?? null,\n    'Unit Price Before Discount': invoiceRow.unitPriceBeforeDiscount ?? null,\n    'Total Before Discount': round2(invoiceRow.totalBeforeDiscount),\n    'Discount Percentage, %':\n      invoiceRow.discountPercentage !== null && invoiceRow.discountPercentage !== undefined\n        ? `${Number(invoiceRow.discountPercentage).toFixed(2)} %`\n        : null,\n    'Unit Price After Discount': invoiceRow.unitPriceAfterDiscount ?? null,\n    'Total,$': round2(invoiceRow.totalPriceAfterDiscount ?? invoiceRow.totalBeforeDiscount),\n    'Commercial Discount, $': round2(invoiceRow.commercialDiscount),\n    'Количество коробок, шт.': scalePackingBoxes(packingTotals.boxes, qtyScale),\n    'Вес, кг': packingTotals.weight !== null ? Number((packingTotals.weight * qtyScale).toFixed(3)) : null,\n    '№ паллета': packingTotals.pallets.join('; ') || null,\n\n    '__row_warning': rowWarnings.length > 0,\n    '__error_article': masterMissing || articleMissing,\n    '__error_qty': qtyMismatch,\n    '__warning_nested_cb': hasNestedInCb,\n    '__warning_boxes_zero': hasZeroBoxes,\n    '__warning_boxes_missing': hasMissingBoxes,\n    '__warning_weight_zero': hasZeroWeight,\n    '__warning_weight_missing': hasMissingWeight,\n    '__warning_reason': rowWarnings.join(' | ') || null,\n  });\n}\n\nconst czRows = [];\nlet czIndex = 1;\n\nfor (const entry of displaySequence) {\n  if (entry.type === 'component') {\n    for (const r of buildComponentCzRows(entry.row)) {\n      czRows.push(r);\n    }\n    continue;\n  }\n\n  const invoiceRow = entry.row;\n  const itemNo = invoiceRow.itemNo;\n  const packingRows = packingMap[itemNo] || [];\n  const batchRows = batchMap[itemNo] || [];\n  const fallbackBatchBarcode = batchRows.find((r) => r.barcode)?.barcode || null;\n  const master = resolveMaster({ itemNo, batchBarcode: fallbackBatchBarcode });\n\n  const masterMissing = !master;\n  const articleMissing = !hasValue(master?.article);\n  const translationMissing = !hasValue(master?.translation);\n  const packageMissing = !hasValue(master?.packageDescription);\n  const customsCodeText = hasValue(master?.customsCode) ? String(master.customsCode).trim() : null;\n  const gtinText = gtinToText(master?.gtin);\n\n  const hasNestedInCb = packingRows.some((r) => hasValue(r.nestedInCb));\n  const hasZeroBoxes = packingRows.some((r) => r.boxes === 0);\n  const hasMissingBoxes = packingRows.some((r) => r.boxes === null || r.boxes === undefined);\n  const hasZeroWeight = packingRows.some((r) => r.weight === 0);\n  const hasMissingWeight = packingRows.some((r) => r.weight === null || r.weight === undefined);\n\n  const buildBaseCzWarnings = () => {\n    const warnings = [];\n\n    if (masterMissing) warnings.push(`нет строки в справочнике для ${itemNo}`);\n    if (!masterMissing && articleMissing) warnings.push('пустой артикул в справочнике');\n    if (!masterMissing && translationMissing) warnings.push('пустой перевод в справочнике');\n    if (!masterMissing && packageMissing) warnings.push('пустые пояснения к материалу и упаковке');\n    if (!customsCodeText) warnings.push('не заполнен Код ТНВЭД');\n    if (!packingRows.length) warnings.push(`нет строки в packing для ${itemNo}`);\n    if (hasAnyBatchFiles && !batchRows.length) warnings.push(`нет строки в batch для ${itemNo}`);\n    if (hasNestedInCb) warnings.push('есть вложение IN CB');\n    if (hasZeroBoxes) warnings.push('есть строка с boxes=0');\n    if (hasMissingBoxes) warnings.push('есть строка без значения boxes');\n    if (hasZeroWeight) warnings.push('есть строка с weight=0');\n    if (hasMissingWeight) warnings.push('есть строка без значения weight');\n\n    return warnings;\n  };\n\n  if (batchRows.length) {\n    for (const batch of batchRows) {\n      const baseQty = Number(invoiceRow.quantity || 0);\n      const share =\n        baseQty && batch.quantity !== null && batch.quantity !== undefined\n          ? Number(batch.quantity) / baseQty\n          : null;\n\n      const finalGtin = gtinText || batch.barcode || null;\n      const rowWarnings = buildBaseCzWarnings();\n      if (!finalGtin) rowWarnings.push('не заполнен GTIN');\n\n      const batchPallet = clean(batch.pallet);\n      const matchedPackingRows = batchPallet\n        ? packingRows.filter((row) =>\n            clean(row.sscc) === batchPallet || clean(row.pallet) === batchPallet\n          )\n        : packingRows;\n      const allocatedPackingRows = matchedPackingRows.length\n        ? matchedPackingRows\n        : packingRows;\n      const packingTotals = aggregatePackingTotals(allocatedPackingRows);\n      const peerBatchRows = batchPallet\n        ? batchRows.filter((row) => clean(row.pallet) === batchPallet)\n        : batchRows;\n      const peerBatchQuantity = peerBatchRows.reduce(\n        (sum, row) => sum + Number(row.quantity || 0),\n        0\n      );\n      const packingShare =\n        peerBatchQuantity && batch.quantity !== null && batch.quantity !== undefined\n          ? Number(batch.quantity) / peerBatchQuantity\n          : (peerBatchRows.length === 1 ? 1 : null);\n      const allocatedBoxes = batch.boxes !== null && batch.boxes !== undefined\n        ? Number(batch.boxes)\n        : (packingTotals.boxes !== null && packingShare !== null\n            ? Math.round(Number(packingTotals.boxes) * packingShare)\n            : null);\n      const allocatedWeight = packingTotals.weight !== null && packingShare !== null\n        ? Number((Number(packingTotals.weight) * packingShare).toFixed(3))\n        : null;\n\n      czRows.push({\n        '#': czIndex++,\n        'Item No.': itemNo,\n        'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n        'Код ТНВЭД': customsCodeText,\n        'GTIN': finalGtin ? `'${finalGtin}` : null,\n        'Description': invoiceRow.description || null,\n        'Перевод': master?.translation ?? '',\n        'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n        'Country Of Origin': master?.countryOfOrigin || normalizeCountry(invoiceRow.countryOfOrigin),\n        'Quantity Количество': batch.quantity ?? invoiceRow.quantity ?? null,\n        'Unit Price Before Discount': invoiceRow.unitPriceBeforeDiscount ?? null,\n        'Total Before Discount': share\n          ? round2(Number(invoiceRow.totalBeforeDiscount) * share)\n          : round2(invoiceRow.totalBeforeDiscount),\n        'Discount Percentage, %':\n          invoiceRow.discountPercentage !== null && invoiceRow.discountPercentage !== undefined\n            ? `${Number(invoiceRow.discountPercentage).toFixed(2)} %`\n            : null,\n        'Unit Price After Discount': invoiceRow.unitPriceAfterDiscount ?? null,\n        'Total,$': share\n          ? round2(Number(invoiceRow.totalPriceAfterDiscount ?? invoiceRow.totalBeforeDiscount) * share)\n          : round2(invoiceRow.totalPriceAfterDiscount ?? invoiceRow.totalBeforeDiscount),\n        'Commercial Discount, $': share\n          ? round2(Number(invoiceRow.commercialDiscount || 0) * share)\n          : round2(invoiceRow.commercialDiscount),\n        'Количество коробок, шт.': allocatedBoxes,\n        'Вес, кг': allocatedWeight,\n        '№ паллета': packingTotals.pallets.join('; ') || null,\n        'Batch No': batch.batchNo || null,\n        'Prod. date': batch.prodDate || null,\n        'Exp. Date': batch.expDate || null,\n        'Data Matrix': master?.dataMatrix ?? null,\n        'этикетка': master?.label ?? null,\n        '% содержания спирта': master?.alcohol ?? null,\n        'ДС': master?.ds ?? null,\n        'ДТ': master?.dt ?? null,\n        'ТОВАР': master?.tovar || batch.itemFrgnName || invoiceRow.description || null,\n\n        '__row_warning': rowWarnings.length > 0,\n        '__error_article': masterMissing || articleMissing,\n        '__error_tnved': !customsCodeText,\n        '__error_gtin': !finalGtin,\n        '__warning_nested_cb': hasNestedInCb,\n        '__warning_boxes_zero': hasZeroBoxes,\n        '__warning_boxes_missing': hasMissingBoxes,\n        '__warning_weight_zero': hasZeroWeight,\n        '__warning_weight_missing': hasMissingWeight,\n        '__warning_reason': rowWarnings.join(' | ') || null,\n      });\n    }\n  } else if (!packingRows.length) {\n    const finalGtin = gtinText || null;\n    const rowWarnings = buildBaseCzWarnings();\n    if (!finalGtin) rowWarnings.push('не заполнен GTIN');\n\n    czRows.push({\n      '#': czIndex++,\n      'Item No.': itemNo,\n      'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n      'Код ТНВЭД': customsCodeText,\n      'GTIN': finalGtin ? `'${finalGtin}` : null,\n      'Description': invoiceRow.description || null,\n      'Перевод': master?.translation ?? '',\n      'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n      'Country Of Origin': master?.countryOfOrigin || normalizeCountry(invoiceRow.countryOfOrigin),\n      'Quantity Количество': invoiceRow.quantity ?? null,\n      'Unit Price Before Discount': invoiceRow.unitPriceBeforeDiscount ?? null,\n      'Total Before Discount': round2(invoiceRow.totalBeforeDiscount),\n      'Discount Percentage, %':\n        invoiceRow.discountPercentage !== null && invoiceRow.discountPercentage !== undefined\n          ? `${Number(invoiceRow.discountPercentage).toFixed(2)} %`\n          : null,\n      'Unit Price After Discount': invoiceRow.unitPriceAfterDiscount ?? null,\n      'Total,$': round2(invoiceRow.totalPriceAfterDiscount ?? invoiceRow.totalBeforeDiscount),\n      'Commercial Discount, $': round2(invoiceRow.commercialDiscount),\n      'Количество коробок, шт.': null,\n      'Вес, кг': null,\n      '№ паллета': null,\n      'Batch No': null,\n      'Prod. date': null,\n      'Exp. Date': null,\n      'Data Matrix': master?.dataMatrix ?? null,\n      'этикетка': master?.label ?? null,\n      '% содержания спирта': master?.alcohol ?? null,\n      'ДС': master?.ds ?? null,\n      'ДТ': master?.dt ?? null,\n      'ТОВАР': master?.tovar || invoiceRow.description || null,\n\n      '__row_warning': rowWarnings.length > 0,\n      '__error_article': masterMissing || articleMissing,\n      '__error_tnved': !customsCodeText,\n      '__error_gtin': !finalGtin,\n      '__warning_nested_cb': hasNestedInCb,\n      '__warning_boxes_zero': hasZeroBoxes,\n      '__warning_boxes_missing': hasMissingBoxes,\n      '__warning_weight_zero': hasZeroWeight,\n      '__warning_weight_missing': hasMissingWeight,\n      '__warning_reason': rowWarnings.join(' | ') || null,\n    });\n  } else {\n    const palletSplits = splitPackingByPallet(packingRows);\n    const czPackingTotals = aggregatePackingTotals(packingRows);\n    const czPackingTotalQty = czPackingTotals.quantity;\n    const czBaseQty = Number(invoiceRow.quantity || 0);\n    const czQtyScale = (czPackingTotalQty && czBaseQty && Number(czPackingTotalQty) !== czBaseQty)\n      ? czBaseQty / Number(czPackingTotalQty)\n      : 1;\n\n    for (const split of palletSplits) {\n      const baseQty = czBaseQty;\n      const palletProportion = (czPackingTotalQty && split.quantity !== null && split.quantity !== undefined)\n        ? Number(split.quantity) / Number(czPackingTotalQty)\n        : null;\n      const invoicePalletQty = (palletProportion !== null && czBaseQty)\n        ? round2(czBaseQty * palletProportion)\n        : split.quantity ?? czBaseQty;\n      const share = palletProportion !== null\n        ? palletProportion\n        : (baseQty && split.quantity !== null && split.quantity !== undefined\n            ? Number(split.quantity) / baseQty\n            : null);\n\n      const finalGtin = gtinText || null;\n      const rowWarnings = buildBaseCzWarnings();\n      if (!finalGtin) rowWarnings.push('не заполнен GTIN');\n\n      czRows.push({\n        '#': czIndex++,\n        'Item No.': itemNo,\n        'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n        'Код ТНВЭД': customsCodeText,\n        'GTIN': finalGtin ? `'${finalGtin}` : null,\n        'Description': invoiceRow.description || null,\n        'Перевод': master?.translation ?? '',\n        'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n        'Country Of Origin': master?.countryOfOrigin || normalizeCountry(invoiceRow.countryOfOrigin),\n        'Quantity Количество': invoicePalletQty,\n        'Unit Price Before Discount': invoiceRow.unitPriceBeforeDiscount ?? null,\n        'Total Before Discount': share\n          ? round2(Number(invoiceRow.totalBeforeDiscount) * share)\n          : round2(invoiceRow.totalBeforeDiscount),\n        'Discount Percentage, %':\n          invoiceRow.discountPercentage !== null && invoiceRow.discountPercentage !== undefined\n            ? `${Number(invoiceRow.discountPercentage).toFixed(2)} %`\n            : null,\n        'Unit Price After Discount': invoiceRow.unitPriceAfterDiscount ?? null,\n        'Total,$': share\n          ? round2(Number(invoiceRow.totalPriceAfterDiscount ?? invoiceRow.totalBeforeDiscount) * share)\n          : round2(invoiceRow.totalPriceAfterDiscount ?? invoiceRow.totalBeforeDiscount),\n        'Commercial Discount, $': share\n          ? round2(Number(invoiceRow.commercialDiscount || 0) * share)\n          : round2(invoiceRow.commercialDiscount),\n        'Количество коробок, шт.': scalePackingBoxes(split.boxes, czQtyScale),\n        'Вес, кг': split.weight !== null ? Number((split.weight * czQtyScale).toFixed(3)) : null,\n        '№ паллета': split.palletKey === 'без паллеты' ? null : split.palletKey,\n        'Batch No': null,\n        'Prod. date': null,\n        'Exp. Date': null,\n        'Data Matrix': master?.dataMatrix ?? null,\n        'этикетка': master?.label ?? null,\n        '% содержания спирта': master?.alcohol ?? null,\n        'ДС': master?.ds ?? null,\n        'ДТ': master?.dt ?? null,\n        'ТОВАР': master?.tovar || invoiceRow.description || null,\n\n        '__row_warning': rowWarnings.length > 0,\n        '__error_article': masterMissing || articleMissing,\n        '__error_tnved': !customsCodeText,\n        '__error_gtin': !finalGtin,\n        '__warning_nested_cb': hasNestedInCb,\n        '__warning_boxes_zero': hasZeroBoxes,\n        '__warning_boxes_missing': hasMissingBoxes,\n        '__warning_weight_zero': hasZeroWeight,\n        '__warning_weight_missing': hasMissingWeight,\n        '__warning_reason': rowWarnings.join(' | ') || null,\n      });\n    }\n  }\n}\n\nreturn [{\n  json: {\n    shipmentKey: bundle.shipmentKey,\n    invoiceNo: bundle.invoiceNo,\n    invoiceDocsCount: bundle.invoiceDocsCount,\n    packingDocsCount: bundle.packingDocsCount,\n    batchDocsCount: bundle.batchDocsCount || 0,\n    customsRows,\n    czRows,\n    warnings: bundle.warnings || [],\n    chatId: bundle.chatId,\n  }\n}];\n"
+      },
+      "id": "4a9ca1cb-fc2f-41ff-b2c8-900d21454e79",
+      "name": "Build Customs and CZ Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1744,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k",
+          "mode": "list",
+          "cachedResultName": "moil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{$json.shipmentKey}}",
+          "mode": "name"
+        }
+      },
+      "id": "13190876-3d79-4fa0-8d40-4b4ff92e38f8",
+      "name": "Clear Customs Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -288,
+        368
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Customs and CZ Rows').first().json;\nreturn (data.customsRows || []).map(row => ({ json: { ...row } }));"
+      },
+      "id": "d07abc61-079e-468d-acb0-6da38661b4d9",
+      "name": "Prepare Customs Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k",
+          "mode": "list",
+          "cachedResultName": "moil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Build Customs and CZ Rows').first().json.shipmentKey }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "id": "f3db6b1f-0aa7-4582-bf6f-32fd41ce6e4e",
+      "name": "Write Customs Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        160,
+        368
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "e3cadc78-3486-44db-a92b-7c4a1fd3c4b4",
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        384,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k",
+          "mode": "list",
+          "cachedResultName": "moil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ \"ЧЗ \" + $json.shipmentKey }}"
+        }
+      },
+      "id": "d97798c6-3cae-40af-8d67-fa97ea721ada",
+      "name": "Clear CZ Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -288,
+        560
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Customs and CZ Rows').first().json;\nreturn (data.czRows || []).map(row => ({ json: { ...row } }));"
+      },
+      "id": "7852be35-3ffe-40b1-beb6-b8de3d3084d3",
+      "name": "Prepare CZ Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k",
+          "mode": "list",
+          "cachedResultName": "moil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ 'ЧЗ ' + $('Build Customs and CZ Rows').first().json.shipmentKey }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "#",
+              "displayName": "#",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Item No.",
+              "displayName": "Item No.",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Артикул",
+              "displayName": "Артикул",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Код ТНВЭД",
+              "displayName": "Код ТНВЭД",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "GTIN",
+              "displayName": "GTIN",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Description",
+              "displayName": "Description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Перевод",
+              "displayName": "Перевод",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Пояснения к материалу и упаковке",
+              "displayName": "Пояснения к материалу и упаковке",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Country Of Origin",
+              "displayName": "Country Of Origin",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Quantity Количество",
+              "displayName": "Quantity Количество",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Unit Price Before Discount",
+              "displayName": "Unit Price Before Discount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total Before Discount",
+              "displayName": "Total Before Discount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Discount Percentage, %",
+              "displayName": "Discount Percentage, %",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Unit Price After Discount",
+              "displayName": "Unit Price After Discount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total,$",
+              "displayName": "Total,$",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Commercial Discount, $",
+              "displayName": "Commercial Discount, $",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Количество коробок, шт.",
+              "displayName": "Количество коробок, шт.",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Вес, кг",
+              "displayName": "Вес, кг",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "№ паллета",
+              "displayName": "№ паллета",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Batch No",
+              "displayName": "Batch No",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Prod. date",
+              "displayName": "Prod. date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Exp. Date",
+              "displayName": "Exp. Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Data Matrix",
+              "displayName": "Data Matrix",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "этикетка",
+              "displayName": "этикетка",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "% содержания спирта",
+              "displayName": "% содержания спирта",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ДС",
+              "displayName": "ДС",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ДТ",
+              "displayName": "ДТ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ТОВАР",
+              "displayName": "ТОВАР",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "__row_warning",
+              "displayName": "__row_warning",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "__error_article",
+              "displayName": "__error_article",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "__error_tnved",
+              "displayName": "__error_tnved",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "__error_gtin",
+              "displayName": "__error_gtin",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "__warning_reason",
+              "displayName": "__warning_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "id": "99092da5-9a0a-442c-828b-f9cbdc94b73c",
+      "name": "Write CZ Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        160,
+        560
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Customs and CZ Rows').first().json;\n\nif (!data || !data.shipmentKey) {\n  return [{\n    json: {\n      chatId: $('Parse Python Output').first().json.chatId ?? null,\n      text: 'Ошибка: не удалось получить данные обработки'\n    }\n  }];\n}\n\nconst shipmentKey = data.shipmentKey;\nconst invoiceDocsCount = data.invoiceDocsCount || 0;\nconst packingDocsCount = data.packingDocsCount || 0;\nconst batchDocsCount = data.batchDocsCount || 0;\nconst customsRowsCount = (data.customsRows || []).length;\nconst czRowsCount = (data.czRows || []).length;\nconst warnings = data.warnings || [];\n\nlet message =\n  `✅ Обработка завершена\\n\\n` +\n  `🏢 Компания: moil\\n` +\n  `📦 Поставка: ${shipmentKey}\\n` +\n  `📄 Invoice документов: ${invoiceDocsCount}\\n` +\n  `📦 Packing документов: ${packingDocsCount}\\n` +\n  `🏷️ Batch документов: ${batchDocsCount}\\n\\n` +\n  `📊 Результаты:\\n` +\n  `• Таможня: ${customsRowsCount} строк\\n` +\n  `• Честный Знак: ${czRowsCount} строк\\n\\n` +\n  `Вкладки:\\n` +\n  `• ${shipmentKey}\\n` +\n  `• ЧЗ ${shipmentKey}`;\n\nif (warnings.length > 0) {\n  message += `\\n\\n⚠️ Предупреждения:\\n`;\n  for (const w of warnings) {\n    message += `• ${w}\\n`;\n  }\n}\n\nreturn [{\n  json: {\n    chatId: data.chatId,\n    text: message.trim(),\n  }\n}];"
+      },
+      "id": "f4d6130d-73cb-47d0-95da-c75ab1bcc5d1",
+      "name": "Prepare Summary Message1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "d51326e4-0932-4991-8268-634b8dbe99d4",
+      "name": "Send Summary1",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        832,
+        464
+      ],
+      "webhookId": "9b29ec21-51ee-48bb-b329-6a2374417ba5",
+      "credentials": {
+        "telegramApi": {
+          "id": "T5Z5WJlAAdfu8qQO",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Customs and CZ Rows').first().json;\n\nif (!data || !data.shipmentKey) {\n  throw new Error('Нет shipmentKey после Build Customs and CZ Rows');\n}\n\nreturn [{\n  json: {\n    spreadsheetId: '1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k',\n    shipmentKey: String(data.shipmentKey),\n    customsSheetName: String(data.shipmentKey),\n    czSheetName: `ЧЗ ${String(data.shipmentKey)}`,\n    templateCustomsName: 'TEMPLATE_CUSTOMS',\n    templateCzName: 'TEMPLATE_CZ',\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1536,
+        480
+      ],
+      "id": "d86d6e8c-0aed-4ce0-a391-3c45f673732c",
+      "name": "Prepare Sheet Setup Data"
+    },
+    {
+      "parameters": {
+        "jsCode": "const meta = $json;\nconst setup = $('Prepare Sheet Setup Data').first().json;\n\nconst sheets = Array.isArray(meta.sheets) ? meta.sheets : [];\nconst titleToSheetId = new Map();\n\nfor (const sheet of sheets) {\n  const props = sheet.properties || {};\n  if (props.title) {\n    titleToSheetId.set(props.title, props.sheetId);\n  }\n}\n\nconst customsExists = titleToSheetId.has(setup.customsSheetName);\nconst czExists = titleToSheetId.has(setup.czSheetName);\n\nconst templateCustomsSheetId = titleToSheetId.get(setup.templateCustomsName);\nconst templateCzSheetId = titleToSheetId.get(setup.templateCzName);\n\nif (templateCustomsSheetId === undefined) {\n  throw new Error(`Не найден шаблонный лист ${setup.templateCustomsName}`);\n}\n\nif (templateCzSheetId === undefined) {\n  throw new Error(`Не найден шаблонный лист ${setup.templateCzName}`);\n}\n\nconst requests = [];\n\nif (!customsExists) {\n  requests.push({\n    duplicateSheet: {\n      sourceSheetId: templateCustomsSheetId,\n      newSheetName: setup.customsSheetName,\n    }\n  });\n}\n\nif (!czExists) {\n  requests.push({\n    duplicateSheet: {\n      sourceSheetId: templateCzSheetId,\n      newSheetName: setup.czSheetName,\n    }\n  });\n}\n\nreturn [{\n  json: {\n    ...setup,\n    customsExists,\n    czExists,\n    templateCustomsSheetId,\n    templateCzSheetId,\n    requests,\n    requestsCount: requests.length,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        480
+      ],
+      "id": "4fe7bd05-97d3-4c3a-841f-267935e86830",
+      "name": "Build Create Requests"
+    },
+    {
+      "parameters": {
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{$json.spreadsheetId}}?fields=sheets.properties(sheetId,title,index,hidden)",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1328,
+        480
+      ],
+      "id": "1c28f18a-c574-4bc5-9af2-95b491c68178",
+      "name": "Get Spreadsheet Metadata",
+      "credentials": {
+        "googleApi": {
+          "id": "3LOHOCZ59mCHy9dU",
+          "name": "Google API SA"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "906c7872-2d09-4be3-8f39-cbd4e128dae3",
+              "leftValue": "={{ $json.requestsCount }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -912,
+        480
+      ],
+      "id": "46d69e9b-ac17-4360-b60a-cb961ea7ddd5",
+      "name": "If Need Create Sheets?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{$json.spreadsheetId}}:batchUpdate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { requests: $json.requests } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -720,
+        384
+      ],
+      "id": "8f24f6d4-a60a-47de-82ca-2614680ac867",
+      "name": "Create Missing Sheets",
+      "credentials": {
+        "googleApi": {
+          "id": "3LOHOCZ59mCHy9dU",
+          "name": "Google API SA"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: $('Build Customs and CZ Rows').first().json\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -544,
+        496
+      ],
+      "id": "42313665-74eb-4388-9f40-522c3cc22556",
+      "name": "Continue After Sheet Ensure"
+    },
+    {
+      "parameters": {
+        "authentication": "privateKey",
+        "command": "={{ \"/opt/moil-venv/bin/python /data/moil/parse_bandi_bundle.py --shipment-key \\\"\" + String($json.shipmentKey || \"\") + \"\\\" --input-dir \\\"\" + String($json.shipmentDir || \"\") + \"\\\" --kits-file \\\"/data/bandi/Наборы Банди для Ч З.xlsx\\\"\" }}",
+        "cwd": "/data/moil"
+      },
+      "id": "85eff41d-0706-4963-a982-7b2e36af0b34",
+      "name": "Call Python Parser - BANDI",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        -2224,
+        992
+      ],
+      "credentials": {
+        "sshPrivateKey": {
+          "id": "ipw0NxJdl6eIz4Ml",
+          "name": "SSH Password account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{$json.spreadsheetId}}?fields=sheets.properties(sheetId,title,index,hidden)",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1136,
+        992
+      ],
+      "id": "324e4fdd-48cb-4ccc-b3c4-d5d953034477",
+      "name": "Get Spreadsheet Metadata - BANDI",
+      "credentials": {
+        "googleApi": {
+          "id": "3LOHOCZ59mCHy9dU",
+          "name": "Google API SA"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{$json.spreadsheetId}}:batchUpdate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { requests: $json.requests } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -544,
+        896
+      ],
+      "id": "56072073-3db0-47da-a811-0fe163944392",
+      "name": "Create Missing Sheets - BANDI",
+      "credentials": {
+        "googleApi": {
+          "id": "3LOHOCZ59mCHy9dU",
+          "name": "Google API SA"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const meta = $json;\nconst setup = $('Prepare Sheet Setup Data - BANDI').first().json;\n\nconst sheets = Array.isArray(meta.sheets) ? meta.sheets : [];\nconst titleToSheetId = new Map();\n\nfor (const sheet of sheets) {\n  const props = sheet.properties || {};\n  if (props.title) titleToSheetId.set(props.title, props.sheetId);\n}\n\nconst dgExists = titleToSheetId.has(setup.dgSheetName);\nconst ndgExists = titleToSheetId.has(setup.ndgSheetName);\nconst czExists = titleToSheetId.has(setup.czSheetName);\n\nconst templateCustomsSheetId = titleToSheetId.get(setup.templateCustomsName);\nconst templateCzSheetId = titleToSheetId.get(setup.templateCzName);\n\nif (templateCustomsSheetId === undefined) throw new Error(`Не найден шаблонный лист ${setup.templateCustomsName}`);\nif (templateCzSheetId === undefined) throw new Error(`Не найден шаблонный лист ${setup.templateCzName}`);\n\nconst requests = [];\n\nif (!dgExists) {\n  requests.push({ duplicateSheet: { sourceSheetId: templateCustomsSheetId, newSheetName: setup.dgSheetName } });\n}\nif (!ndgExists) {\n  requests.push({ duplicateSheet: { sourceSheetId: templateCustomsSheetId, newSheetName: setup.ndgSheetName } });\n}\nif (!czExists) {\n  requests.push({ duplicateSheet: { sourceSheetId: templateCzSheetId, newSheetName: setup.czSheetName } });\n}\n\nreturn [{\n  json: {\n    ...setup,\n    dgExists,\n    ndgExists,\n    czExists,\n    templateCustomsSheetId,\n    templateCzSheetId,\n    requests,\n    requestsCount: requests.length,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -944,
+        992
+      ],
+      "id": "f635716b-82fe-4a44-97fd-2b0e5bd3d52e",
+      "name": "Build Create Requests - BANDI"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: $('Build Bandi Customs and CZ Rows').first().json\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        1008
+      ],
+      "id": "fb3d8475-f2a5-4b4a-b241-05061bd9e01a",
+      "name": "Continue After Sheet Ensure - BANDI"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU",
+          "mode": "list",
+          "cachedResultName": "bandi",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ \"ЧЗ \" + $json.shipmentKey }}",
+          "mode": "name"
+        }
+      },
+      "id": "526d4b8f-8347-441e-8d99-7bef7be9edf8",
+      "name": "Clear CZ Sheet - BANDI",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -80,
+        1264
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Bandi Customs and CZ Rows').first().json;\nreturn (data.czRows || []).map(row => ({ json: { ...row } }));"
+      },
+      "id": "373d84a2-d067-4ae8-80c9-0e0607f2d09f",
+      "name": "Prepare CZ Rows - BANDI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        1264
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Bandi Customs and CZ Rows').first().json;\n\nif (!data || !data.shipmentKey) {\n  return [{\n    json: {\n      chatId: $('Parse Python Output - BANDI').first().json.chatId ?? null,\n      text: 'Ошибка: не удалось получить данные обработки'\n    }\n  }];\n}\n\nconst shipmentKey = data.shipmentKey;\nconst invoiceDocsCount = data.invoiceDocsCount || 0;\nconst packingDocsCount = data.packingDocsCount || 0;\nconst dgRowsCount = (data.dgRows || []).length;\nconst ndgRowsCount = (data.ndgRows || []).length;\nconst czRowsCount = (data.czRows || []).length;\nconst kitsCount = data.kitsCount || 0;\nconst warnings = data.warnings || [];\n\nlet message =\n  `✅ Обработка завершена\n\n` +\n  `🏢 Компания: bandi\n` +\n  `📦 Поставка: ${shipmentKey}\n` +\n  `📄 Invoice документов: ${invoiceDocsCount}\n` +\n  `📦 Packing документов: ${packingDocsCount}\n` +\n  `🎁 Наборов в справочнике: ${kitsCount}\n\n` +\n  `📊 Результаты:\n` +\n  `• DG: ${dgRowsCount} строк\n` +\n  `• NDG: ${ndgRowsCount} строк\n` +\n  `• Честный Знак: ${czRowsCount} строк\n\n` +\n  `Вкладки:\n` +\n  `• DG ${shipmentKey}\n` +\n  `• NDG ${shipmentKey}\n` +\n  `• ЧЗ ${shipmentKey}`;\n\nif (warnings.length > 0) {\n  message += `\n\n⚠️ Предупреждения:\n`;\n  for (const w of warnings) {\n    message += `• ${w}\n`;\n  }\n}\n\nreturn [{\n  json: {\n    chatId: data.chatId,\n    text: message.trim(),\n  }\n}];\n"
+      },
+      "id": "ea039932-2fa2-4cfd-8515-396c4e519841",
+      "name": "Prepare Summary Message - BANDI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1024,
+        1136
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "238a6aa5-6ee8-480f-8917-4b47c4214b4e",
+      "name": "Send Summary - BANDI",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1216,
+        1136
+      ],
+      "webhookId": "565b762b-8a82-4bde-88b2-b4dc37a7ce92",
+      "credentials": {
+        "telegramApi": {
+          "id": "T5Z5WJlAAdfu8qQO",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const pythonData = $('Parse Python Output - BANDI').first().json;\nconst masterRows = $input.all().map(item => item.json);\n\nif (!pythonData || !Array.isArray(pythonData.invoiceRows || pythonData.czInvoiceRows || pythonData.dgInvoiceRows)) {\n  return [{\n    json: {\n      error: pythonData?.error || 'No BANDI Python data found',\n      chatId: pythonData?.chatId || null,\n    }\n  }];\n}\n\nconst INCLUDE_PACKAGE_DESCRIPTION = true;\nconst INCLUDE_UNIT_PRICE = true;\nconst WARN_NET_GT_GROSS = true;\nconst USE_PART_FOR_SHARED_CARTONS = true;\n\nconst clean = (value) => String(value ?? '').trim();\nconst hasValue = (value) => value !== null && value !== undefined && value !== '';\nconst normalizeHeader = (value) => String(value ?? '').toLowerCase().replace(/[^a-z0-9а-яё]+/g, '');\nconst gtinKey = (value) => String(value ?? '').replace(/\\D/g, '');\nconst upper = (value) => String(value ?? '').trim().toUpperCase();\nconst parseNumber = (value) => {\n  if (!hasValue(value)) return null;\n  if (typeof value === 'number') return Number.isFinite(value) ? value : null;\n  const normalized = String(value).replace(/\\s+/g, '').replace(',', '.').replace(/[^\\d.-]/g, '');\n  if (!normalized) return null;\n  const num = Number(normalized);\n  return Number.isFinite(num) ? num : null;\n};\nconst uniq = (arr) => [...new Set(arr.filter(v => hasValue(v)).map(v => String(v).trim()))];\nconst joinSemi = (arr) => {\n  const values = uniq(arr);\n  return values.length ? values.join('; ') : null;\n};\nconst round3 = (v) => v === null || v === undefined ? null : Number(Number(v).toFixed(3));\nconst round2 = (v) => v === null || v === undefined ? null : Number(Number(v).toFixed(2));\nconst formatDateRu = (d) => {\n  if (!(d instanceof Date) || isNaN(d.getTime())) return null;\n  const dd = String(d.getUTCDate()).padStart(2, '0');\n  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');\n  const yy = d.getUTCFullYear();\n  return `${dd}.${mm}.${yy}`;\n};\nconst parseLotToDate = (lot) => {\n  const t = clean(lot);\n  const m = t.match(/^(\\d{4})(\\d{2})(\\d{2})$/);\n  if (!m) return null;\n  const y = Number(m[1]); const mo = Number(m[2]); const d = Number(m[3]);\n  const dt = new Date(Date.UTC(y, mo - 1, d));\n  if (isNaN(dt.getTime())) return null;\n  return dt;\n};\nconst addMonthsMinusOneDay = (date, months) => {\n  if (!(date instanceof Date) || !Number.isFinite(months)) return null;\n  const dt = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, date.getUTCDate()));\n  dt.setUTCDate(dt.getUTCDate() - 1);\n  return dt;\n};\n\n// Master catalog: pull all needed fields incl. Alcohol/SD-Alcohol/ACETON/ДС/даты/производитель/страна/срок годности (мес)\nconst detectMaster = (row) => {\n  const map = {};\n  for (const [key, value] of Object.entries(row)) {\n    map[normalizeHeader(key)] = value;\n  }\n  const get = (...keys) => {\n    for (const key of keys) {\n      const value = map[normalizeHeader(key)];\n      if (hasValue(value)) return value;\n    }\n    return null;\n  };\n\n  const gtin = gtinKey(get('GTIN', 'gtin', 'Barcode', 'Штрихкод', 'Баркод', 'EAN', 'Код товара GTIN'));\n  if (!gtin) return null;\n\n  return {\n    gtin,\n    article: get('Артикул', 'Артикул РУ', 'Vendor Code', 'VENDOR CODE', 'article'),\n    dgFlag: clean(get('DG/NDG', 'DG/ NDG', 'DGNDG')) || null,\n    customsCode: get('ТНВЭД', 'HS CODE', 'HSCode', 'Код ТНВЭД', 'Код ТНВЭД (13933)'),\n    productEng: get('Product (Eng)', 'DESCRIPTION OF GOODS', 'Description', 'Полное наименование товара (24...)'),\n    productRus: get('Product (Rus)', 'Наименование РУС', 'Перевод', 'Полное наименование товара'),\n    volume: get('Volume', 'Номинальное количество (23820)', 'Объём'),\n    packageDescription: get('Описание упаковки', 'Пояснения к материалу и упаковке', 'PACKAGE DESCRIPTION RU', 'Тип (23820)'),\n    alcohol: get('Alcohol', 'алкоголь округл', 'алкоголь оригинал'),\n    sdAlcohol: get('SD-Alcohol', 'SD Alcohol'),\n    aceton: get('ACETON', 'Ацетон', 'Acetone'),\n    conformityDoc: get('ДС', 'Декларация о соответствии (235...)', 'Декларация о соответствии'),\n    conformityStart: get('Дата начало', 'дата нач серт', 'Дата начала'),\n    conformityEnd: get('Дата окончан', 'дата окон серт', 'Дата окончания'),\n    expiryMonths: parseNumber(get('Срок годности', 'СРОК ГОДНОСТИ В МЕС.', 'Срок годности (мес)')),\n    manufacturer: get('производитель', 'Производитель'),\n    country: get('страна происхождения', 'Страна происхождения', 'Страна'),\n    labelSize: get('Размер этикетки', 'Размер Эткетки', 'Размер'),\n  };\n};\n\nconst masterByGtin = {};\nfor (const row of masterRows) {\n  const parsed = detectMaster(row);\n  if (parsed) masterByGtin[parsed.gtin] = parsed;\n}\n\n// Kits mapping: build lookup by vendor code AND gtin -> {components: [...], multiplier}\nconst kitMultiplier = (volumeText) => {\n  const t = clean(volumeText);\n  if (!t) return 1;\n  const m = t.match(/(\\d+)\\s*[*xх×]\\s*(\\d+)/i);\n  if (!m) return 1;\n  return Number(m[1]) || 1;\n};\n\nconst kitsByVendor = {};\nconst kitsByGtin = {};\nfor (const k of (pythonData.kitsMapping || [])) {\n  const mult = kitMultiplier(k.kitVolume);\n  const entry = {\n    kitGtin: gtinKey(k.kitGtin),\n    kitVendorCode: upper(k.kitVendorCode),\n    kitNameEng: k.kitNameEng || null,\n    kitNameRus: k.kitNameRus || null,\n    kitVolume: k.kitVolume || null,\n    multiplier: mult,\n    components: (k.components || []).map(c => ({\n      gtin: gtinKey(c.gtin),\n      vendorCode: upper(c.vendorCode),\n      dgFlag: clean(c.dgFlag) || null,\n      hsCode: clean(c.hsCode) || null,\n      nameEng: c.nameEng || null,\n      nameRus: c.nameRus || null,\n      volume: c.volume || null,\n    })),\n  };\n  if (entry.kitVendorCode) kitsByVendor[entry.kitVendorCode] = entry;\n  if (entry.kitGtin) kitsByGtin[entry.kitGtin] = entry;\n}\nconst findKit = (row) => {\n  const v = upper(row?.vendorCode);\n  if (v && kitsByVendor[v]) return kitsByVendor[v];\n  const g = gtinKey(row?.gtin);\n  if (g && kitsByGtin[g]) return kitsByGtin[g];\n  return null;\n};\n\nconst buildCartonItemMap = (rows) => {\n  const cartonMap = {};\n  for (const row of rows || []) {\n    const cartonNo = clean(row.cartonNo);\n    const gtin = gtinKey(row.gtin);\n    if (!cartonNo || !gtin) continue;\n    if (!cartonMap[cartonNo]) cartonMap[cartonNo] = new Set();\n    cartonMap[cartonNo].add(gtin);\n  }\n  return cartonMap;\n};\n\nconst globalCartonItemMap = buildCartonItemMap(pythonData.packingRows || pythonData.czPackingRows || []);\n\nconst formatCarton = (cartonNoRaw) => {\n  const cartonNo = clean(cartonNoRaw);\n  if (!cartonNo) return null;\n  const shared = globalCartonItemMap[cartonNo] && globalCartonItemMap[cartonNo].size > 1;\n  return USE_PART_FOR_SHARED_CARTONS && shared ? `Часть ${cartonNo}; ` : `${cartonNo}; `;\n};\n\nconst buildInvoiceMap = (invoiceRows) => {\n  const invoiceMap = {};\n  for (const row of invoiceRows || []) {\n    const gtin = gtinKey(row.gtin);\n    if (!gtin) continue;\n\n    if (!invoiceMap[gtin]) {\n      invoiceMap[gtin] = {\n        gtin,\n        lineNos: [],\n        vendorCode: clean(row.vendorCode) || null,\n        dgFlag: clean(row.dgFlag) || null,\n        description: clean(row.description) || null,\n        hsCode: clean(row.hsCode) || null,\n        quantity: 0,\n        amount: 0,\n        unitPrice: parseNumber(row.unitPrice),\n      };\n    }\n\n    const target = invoiceMap[gtin];\n    if (hasValue(row.lineNo)) target.lineNos.push(row.lineNo);\n    if (!target.vendorCode && hasValue(row.vendorCode)) target.vendorCode = clean(row.vendorCode);\n    if (!target.dgFlag && hasValue(row.dgFlag)) target.dgFlag = clean(row.dgFlag);\n    if (!target.description && hasValue(row.description)) target.description = clean(row.description);\n    if (!target.hsCode && hasValue(row.hsCode)) target.hsCode = clean(row.hsCode);\n\n    target.quantity += parseNumber(row.quantity) || 0;\n    target.amount += parseNumber(row.amount) || 0;\n    if ((target.unitPrice === null || target.unitPrice === undefined) && hasValue(row.unitPrice)) {\n      target.unitPrice = parseNumber(row.unitPrice);\n    }\n  }\n  return invoiceMap;\n};\n\nconst buildPackingMap = (packingRows) => {\n  const packingMap = {};\n  for (const row of packingRows || []) {\n    const gtin = gtinKey(row.gtin);\n    if (!gtin) continue;\n\n    if (!packingMap[gtin]) {\n      packingMap[gtin] = {\n        gtin,\n        rows: [],\n        lineNos: [],\n        cartonNos: [],\n        palletNos: [],\n        lots: [],\n        quantity: 0,\n        netWeight: 0,\n        grossWeight: 0,\n        dgFlag: clean(row.dgFlag) || null,\n        description: clean(row.description) || null,\n        vendorCode: clean(row.vendorCode) || null,\n      };\n    }\n\n    const target = packingMap[gtin];\n    target.rows.push(row);\n    if (hasValue(row.lineNo)) target.lineNos.push(row.lineNo);\n    if (hasValue(row.cartonNo)) target.cartonNos.push(clean(row.cartonNo));\n    if (hasValue(row.palletNo)) target.palletNos.push(clean(row.palletNo));\n    if (hasValue(row.lot)) target.lots.push(clean(row.lot));\n\n    target.quantity += parseNumber(row.quantity) || 0;\n    target.netWeight += parseNumber(row.netWeight) || 0;\n    target.grossWeight += parseNumber(row.grossWeight) || 0;\n    if (!target.dgFlag && hasValue(row.dgFlag)) target.dgFlag = clean(row.dgFlag);\n    if (!target.description && hasValue(row.description)) target.description = clean(row.description);\n    if (!target.vendorCode && hasValue(row.vendorCode)) target.vendorCode = clean(row.vendorCode);\n  }\n  return packingMap;\n};\n\nconst buildCartonLabelAggregated = (cartonNos) => {\n  const labels = [];\n  for (const cartonNoRaw of uniq(cartonNos)) {\n    const cartonNo = clean(cartonNoRaw);\n    if (!cartonNo) continue;\n    const shared = globalCartonItemMap[cartonNo] && globalCartonItemMap[cartonNo].size > 1;\n    labels.push(USE_PART_FOR_SHARED_CARTONS && shared ? `часть ${cartonNo}` : cartonNo);\n  }\n  return labels.length ? labels.join('; ') : null;\n};\n\n// === CUSTOMS (DG/NDG) — aggregated rows per GTIN, with new columns from master ===\nconst buildCustomsRowsForGroup = (groupKey, invoiceRows, packingRows) => {\n  const invoiceMap = buildInvoiceMap(invoiceRows);\n  const packingMap = buildPackingMap(packingRows);\n  const allGtins = [...new Set([...Object.keys(invoiceMap), ...Object.keys(packingMap)])].sort();\n\n  const rows = [];\n  let index = 1;\n\n  for (const gtin of allGtins) {\n    const invoice = invoiceMap[gtin] || null;\n    const packing = packingMap[gtin] || null;\n    const master = masterByGtin[gtin] || null;\n\n    const warnings = [];\n    if (!invoice) warnings.push(`нет строки в invoice для GTIN ${gtin}`);\n    if (!packing) warnings.push(`нет строки в packing для GTIN ${gtin}`);\n    if (!master) warnings.push(`нет строки в master для GTIN ${gtin}`);\n\n    const invQty = invoice ? Number(invoice.quantity || 0) : null;\n    const packQty = packing ? Number(packing.quantity || 0) : null;\n    if (invoice && packing && invQty !== packQty) warnings.push(`qty invoice=${invQty}, packing=${packQty}`);\n\n    const netWeight = packing ? round3(packing.netWeight) : null;\n    const grossWeight = packing ? round3(packing.grossWeight) : null;\n    const netGreaterThanGross =\n      WARN_NET_GT_GROSS && netWeight !== null && grossWeight !== null && netWeight > grossWeight;\n    if (netGreaterThanGross) warnings.push(`net > gross (${netWeight} > ${grossWeight})`);\n\n    const row = {\n      '#': index++,\n      'GTIN': gtin ? `'${gtin}` : null,\n      'Артикул': invoice?.vendorCode || master?.article || packing?.vendorCode || null,\n      'DG/NDG': groupKey === 'CZ' ? (invoice?.dgFlag || packing?.dgFlag || master?.dgFlag || null) : groupKey,\n      '№ по инвойсу': joinSemi(invoice?.lineNos || []),\n      'кол-во по инв': invoice ? invoice.quantity : null,\n      '№ по упак': joinSemi(packing?.lineNos || []),\n      'кол-во': packing ? packing.quantity : null,\n      'вес НЕТТО': netWeight,\n      'вес БРУТТО': grossWeight,\n      'коробка': buildCartonLabelAggregated(packing?.cartonNos || []),\n      'LOT': packing?.lots?.length ? \"'\" + uniq(packing.lots).join('; ') : null,\n      '№ паллета': joinSemi(packing?.palletNos || []),\n      'ТНВЭД': hasValue(master?.customsCode) ? \"'\" + String(master.customsCode) : null,\n      'Product (Eng)': master?.productEng || invoice?.description || packing?.description || null,\n      'Product (Rus)': master?.productRus || null,\n      'Volume': master?.volume || null,\n      'Описание упаковки': master?.packageDescription || null,\n      'Цена за шт.': invoice?.unitPrice ?? null,\n      'Amount $': invoice ? round2(invoice.amount) : null,\n      'Alcohol': master?.alcohol ?? null,\n      'SD-Alcohol': master?.sdAlcohol ?? null,\n      'ACETON': master?.aceton ?? null,\n      'ДС': master?.conformityDoc ?? null,\n      'Дата начало': master?.conformityStart ?? null,\n      'Дата окончан': master?.conformityEnd ?? null,\n      'ЧЗ ДС': null,\n      'СРОК ГОДНОСТИ В МЕС.': master?.expiryMonths ?? null,\n      'производитель': master?.manufacturer ?? null,\n      'страна происхождения': master?.country ?? null,\n      'Дата изготовления': (() => { const lots = packing?.lots || []; if (!lots.length) return null; const d = parseLotToDate(lots[0]); return d ? formatDateRu(d) : null; })(),\n      'Годен до': (() => { const lots = packing?.lots || []; if (!lots.length) return null; const d = parseLotToDate(lots[0]); if (!d) return null; const m = parseNumber(master?.expiryMonths); if (m == null) return null; return formatDateRu(addMonthsMinusOneDay(d, m)); })(),\n      '__row_warning': warnings.length > 0,\n      '__warning_net_gt_gross': netGreaterThanGross,\n      '__warning_reason': warnings.join(' | ') || null,\n    };\n\n    rows.push(row);\n  }\n  return rows;\n};\n\n// === CZ — built from packing rows directly (one packing row = one CZ row) + kit expansion ===\nconst buildCzRowFromPacking = (packingRow, opts) => {\n  opts = opts || {};\n  const gtin = gtinKey(opts.overrideGtin || packingRow.gtin);\n  const master = masterByGtin[gtin] || null;\n  const lot = clean(packingRow.lot);\n  const prodDate = parseLotToDate(lot);\n  const months = master?.expiryMonths != null ? Number(master.expiryMonths) : null;\n  const expDate = (prodDate && Number.isFinite(months)) ? addMonthsMinusOneDay(prodDate, months) : null;\n\n  const qty = parseNumber(packingRow.quantity);\n  const finalQty = opts.qtyMultiplier ? (qty != null ? qty * opts.qtyMultiplier : null) : qty;\n\n  const netWeight = round3(packingRow.netWeight);\n  const grossWeight = round3(packingRow.grossWeight);\n  const netGreaterThanGross =\n    WARN_NET_GT_GROSS && netWeight !== null && grossWeight !== null && netWeight > grossWeight;\n\n  return {\n    'GTIN': gtin ? `'${gtin}` : null,\n    'Артикул': opts.vendorCode || packingRow.vendorCode || master?.article || null,\n    'DG/NDG': clean(packingRow.dgFlag) || master?.dgFlag || clean(packingRow.__effectiveCustomsScope) || (opts.scopeMap && opts.scopeMap[clean(packingRow.vendorCode)]) || null,\n    'Наименование АНГЛ': opts.nameEng || master?.productEng || packingRow.description || null,\n    'Наименование РУС': opts.nameRus || master?.productRus || null,\n    'ТНВЭД': hasValue(master?.customsCode) ? \"'\" + String(master.customsCode) : null,\n    'LOT': lot ? `'${lot}` : null,\n    'Срок годности': months ?? null,\n    'Дата изгот': prodDate ? formatDateRu(prodDate) : null,\n    'Годен до': expDate ? formatDateRu(expDate) : null,\n    'Кол-во': finalQty,\n    'Коробка №': formatCarton(packingRow.cartonNo),\n    '№ паллета': hasValue(packingRow.palletNo) ? `PLT №${clean(packingRow.palletNo)}` : null,\n    'Data Matrix': 'Да',\n    'Размер Этикетки': master?.labelSize || null,\n    'Примечание по этикетке': null,\n    'Концентрация спирта, % ЭТИЛОВЫЙ СПИРТ (ЭТАНОЛ)': master?.alcohol ?? null,\n    'Вложения в наборы': opts.kitNote || null,\n    'Цена за шт.': null,\n    '__row_warning': netGreaterThanGross,\n    '__warning_net_gt_gross': netGreaterThanGross,\n    '__warning_reason': netGreaterThanGross ? `net > gross (${netWeight} > ${grossWeight})` : null,\n  };\n};\n\nconst buildCartonRange = (cartonNos) => {\n  const valid = cartonNos.filter(Boolean);\n  if (!valid.length) return null;\n  if (valid.length === 1) return `${valid[0]}; `;\n  const nums = valid.map(n => parseNumber(n)).filter(n => n !== null);\n  if (nums.length === valid.length) {\n    const sorted = [...nums].sort((a, b) => a - b);\n    const consecutive = sorted.every((n, i) => i === 0 || n === sorted[i - 1] + 1);\n    if (consecutive) return `${sorted[0]}-${sorted[sorted.length - 1]}`;\n  }\n  return valid.map(c => `${c}; `).join('');\n};\n\nconst buildCzRows = () => {\n  const invoiceScopeByVendor = {};\n  const allInvoices = [\n    ...(pythonData.dgInvoiceRows || []).map(r => ({ ...r, __scope: 'DG' })),\n    ...(pythonData.ndgInvoiceRows || []).map(r => ({ ...r, __scope: 'NDG' })),\n  ];\n  for (const inv of allInvoices) {\n    const vc = clean(inv.vendorCode);\n    if (vc && !invoiceScopeByVendor[vc]) invoiceScopeByVendor[vc] = inv.__scope;\n  }\n  const packingRows = pythonData.czPackingRows || pythonData.packingRows || [];\n  const rows = [];\n\n  // Pre-group kit rows by (gtin, lot) so we can aggregate\n  const kitGroups = {};\n  for (const pr of packingRows) {\n    const kit = findKit(pr);\n    if (!kit) continue;\n    const key = `${gtinKey(pr.gtin)}|${clean(pr.lot)}`;\n    if (!kitGroups[key]) kitGroups[key] = { kit, rows: [] };\n    kitGroups[key].rows.push(pr);\n  }\n\n  const emittedKits = {};\n  for (const packingRow of packingRows) {\n    const kit = findKit(packingRow);\n    if (!kit) {\n      // Regular row: one per carton\n      rows.push(buildCzRowFromPacking(packingRow, { scopeMap: invoiceScopeByVendor }));\n    } else {\n      const key = `${gtinKey(packingRow.gtin)}|${clean(packingRow.lot)}`;\n      if (emittedKits[key]) continue; // already emitted this kit group\n      emittedKits[key] = true;\n\n      const group = kitGroups[key];\n      const totalQty = group.rows.reduce((s, r) => s + (parseNumber(r.quantity) || 0), 0);\n      const cartonLabel = buildCartonRange(group.rows.map(r => clean(r.cartonNo)));\n\n      // Aggregated kit row (Вложения = empty)\n      const kitRow = buildCzRowFromPacking(group.rows[0], { kitNote: null, scopeMap: invoiceScopeByVendor });\n      kitRow['Кол-во'] = totalQty;\n      kitRow['Коробка №'] = cartonLabel;\n      rows.push({ __kitRow: true, ...kitRow });\n\n      // Component rows: one per component, total qty, no carton, no # (marked as component)\n      for (const comp of kit.components) {\n        const compRow = buildCzRowFromPacking(group.rows[0], {\n          overrideGtin: comp.gtin,\n          vendorCode: comp.vendorCode,\n          nameEng: comp.nameEng,\n          nameRus: comp.nameRus,\n          qtyMultiplier: null,\n          kitNote: '*',\n        });\n        compRow['Кол-во'] = totalQty * kit.multiplier;\n        compRow['Коробка №'] = null;\n        rows.push({ __compRow: true, ...compRow });\n      }\n    }\n  }\n\n  // Renumber: kit rows and regular rows get sequential #, component rows get null\n  let seq = 1;\n  return rows.map(r => {\n    const isComp = r.__compRow;\n    const { __kitRow, __compRow, ...rest } = r;\n    return { '#': isComp ? null : seq++, ...rest };\n  });\n};\n\nconst dgRows = buildCustomsRowsForGroup('DG', pythonData.dgInvoiceRows || [], pythonData.dgPackingRows || []);\nconst ndgRows = buildCustomsRowsForGroup('NDG', pythonData.ndgInvoiceRows || [], pythonData.ndgPackingRows || []);\nconst czRows = buildCzRows();\n\nreturn [{\n  json: {\n    shipmentKey: pythonData.shipmentKey,\n    dgSheetName: `DG ${pythonData.shipmentKey}`,\n    ndgSheetName: `NDG ${pythonData.shipmentKey}`,\n    czSheetName: `ЧЗ ${pythonData.shipmentKey}`,\n    invoiceDocsCount: pythonData.invoiceDocsCount || 0,\n    packingDocsCount: pythonData.packingDocsCount || 0,\n    kitsCount: pythonData.kitsCount || 0,\n    dgRows,\n    ndgRows,\n    czRows,\n    warnings: pythonData.warnings || [],\n    chatId: pythonData.chatId || null,\n  }\n}];\n"
+      },
+      "id": "ef699bb3-d2cd-49eb-8fb1-b192db73813e",
+      "name": "Build Bandi Customs and CZ Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1552,
+        992
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst chatId = $('Start BANDI Processing').first().json.chatId ?? null;\nconst results = [];\n\nfor (const item of items) {\n  const stdout = item.json.stdout || '';\n  const stderr = item.json.stderr || '';\n  const code = item.json.code;\n\n  if (code !== 0) {\n    results.push({\n      json: {\n        error: 'Python script failed',\n        stderr,\n        code,\n        chatId,\n      }\n    });\n    continue;\n  }\n\n  try {\n    const parsed = JSON.parse(stdout);\n    results.push({\n      json: {\n        ...parsed,\n        chatId,\n      }\n    });\n  } catch (e) {\n    results.push({\n      json: {\n        error: 'Failed to parse Python output',\n        stdout,\n        parseError: e.message,\n        chatId,\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "5ba9dbf5-cd25-4867-9450-faaf421640f4",
+      "name": "Parse Python Output - BANDI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2000,
+        992
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "documentId": {
+          "__rl": true,
+          "value": "1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU",
+          "mode": "list",
+          "cachedResultName": "bandi",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 558619466,
+          "mode": "list",
+          "cachedResultName": "_master_catalog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU/edit#gid=558619466"
+        },
+        "options": {}
+      },
+      "id": "2a6351bb-8e52-44db-bab3-c27ff105a9cb",
+      "name": "Read Master Catalog - BANDI",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -1776,
+        992
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Bandi Customs and CZ Rows').first().json;\n\nif (!data || !data.shipmentKey) {\n  throw new Error('Нет shipmentKey после Build Bandi Customs and CZ Rows');\n}\n\nreturn [{\n  json: {\n    spreadsheetId: '1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU',\n    shipmentKey: String(data.shipmentKey),\n    dgSheetName: `DG ${String(data.shipmentKey)}`,\n    ndgSheetName: `NDG ${String(data.shipmentKey)}`,\n    czSheetName: `ЧЗ ${String(data.shipmentKey)}`,\n    templateCustomsName: 'TEMPLATE_CUSTOMS',\n    templateCzName: 'TEMPLATE_CZ',\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1344,
+        992
+      ],
+      "id": "51b943d4-6286-4f66-8211-19e4837aef2c",
+      "name": "Prepare Sheet Setup Data - BANDI"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "906c7872-2d09-4be3-8f39-cbd4e128dae3",
+              "leftValue": "={{ $json.requestsCount }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -752,
+        992
+      ],
+      "id": "6053ab70-5ea6-4dcc-876a-61704ab5a59c",
+      "name": "If Need Create Sheets? - BANDI"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU",
+          "mode": "list",
+          "cachedResultName": "bandi",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ \"ЧЗ \" + $('Build Bandi Customs and CZ Rows').first().json.shipmentKey }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "id": "a1bbeacf-4db3-4449-ae9f-f8ad161ce5a0",
+      "name": "Write CZ Rows - BANDI",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        368,
+        1264
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "privateKey",
+        "command": "={{ \"/opt/moil-venv/bin/python /data/moil/parse_moroccanoil_bundle.py --shipment-key \\\"\" + String($json.shipmentKey || \"\") + \"\\\" --input-dir \\\"\" + String($json.shipmentDir || \"\") + \"\\\"\" }}",
+        "cwd": "/data/moil"
+      },
+      "id": "d76bee11-cd0d-4140-a3a1-bd1e0d65cf0e",
+      "name": "Call Python Parser - MOROCCANOIL",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        -2448,
+        1584
+      ],
+      "credentials": {
+        "sshPrivateKey": {
+          "id": "ipw0NxJdl6eIz4Ml",
+          "name": "SSH Password account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst chatId = $('Start MOROCCANOIL Processing').first().json.chatId ?? null;\nconst results = [];\n\nfor (const item of items) {\n  const stdout = item.json.stdout || '';\n  const stderr = item.json.stderr || '';\n  const code = item.json.code;\n\n  if (code !== 0) {\n    results.push({\n      json: {\n        error: 'Python script failed',\n        stderr,\n        code,\n        chatId,\n      }\n    });\n    continue;\n  }\n\n  try {\n    const parsed = JSON.parse(stdout);\n    results.push({\n      json: {\n        ...parsed,\n        chatId,\n      }\n    });\n  } catch (e) {\n    results.push({\n      json: {\n        error: 'Failed to parse Python output',\n        stdout,\n        parseError: e.message,\n        chatId,\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "a70193fc-d3cb-432b-9f38-ff0899fc8faf",
+      "name": "Parse Python Output - MOROCCANOIL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2224,
+        1584
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "documentId": {
+          "__rl": true,
+          "value": "1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI",
+          "mode": "list",
+          "cachedResultName": "moroccanoil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 792686501,
+          "mode": "list",
+          "cachedResultName": "_master_catalog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI/edit#gid=792686501"
+        },
+        "options": {}
+      },
+      "id": "9f950771-754a-4163-a8dd-4e3a2f857498",
+      "name": "Read Master Catalog - MOROCCANOIL",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -2000,
+        1584
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const pythonData = $('Parse Python Output - MOROCCANOIL').first().json;\nconst masterRows = $input.all().map((item) => item.json);\n\nif (!pythonData || !pythonData.invoiceRows) {\n  return [{\n    json: {\n      error: pythonData?.error || 'No Python data found',\n      chatId: pythonData?.chatId || null\n    }\n  }];\n}\n\nconst clean = (value) => String(value ?? '').trim();\n\nconst normalizeCode = (value) =>\n  clean(value).replace(/[^A-Z0-9-]/gi, '').toUpperCase();\n\nconst hasValue = (value) =>\n  value !== null && value !== undefined && value !== '';\n\nconst parseNumber = (value) => {\n  if (!hasValue(value)) return null;\n  const normalized = String(value).replace(/[^\\d,.-]/g, '').replace(/,/g, '');\n  const num = Number(normalized);\n  return Number.isFinite(num) ? num : null;\n};\n\nconst uniqSorted = (values) =>\n  [...new Set(values.filter((v) => hasValue(v)).map((v) => String(v)))]\n    .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));\n\nconst round2 = (value) =>\n  value === null || value === undefined ? null : Number(Number(value).toFixed(2));\n\nconst countryMap = {\n  'израиль': 'Israel',\n  'israel': 'Israel',\n  'china': 'China',\n  'китай': 'China',\n  'usa': 'USA',\n  'u.s.a.': 'USA',\n  'сша': 'USA',\n};\n\nconst normalizeCountry = (value) => {\n  const raw = clean(value);\n  if (!raw) return '';\n  const key = raw.toLowerCase();\n  return countryMap[key] || raw;\n};\n\nconst gtinToText = (value) => {\n  if (value === null || value === undefined || value === '') return null;\n\n  if (typeof value === 'number' && Number.isFinite(value)) {\n    return String(Math.trunc(value));\n  }\n\n  const text = String(value).trim();\n\n  if (/^\\d+\\.0+$/.test(text)) {\n    return text.replace(/\\.0+$/, '');\n  }\n\n  const digits = text.replace(/\\D/g, '');\n  return digits || null;\n};\n\nconst detectMaster = (row) => {\n  const get = (...keys) => {\n    for (const key of keys) {\n      if (hasValue(row[key])) return row[key];\n    }\n    return null;\n  };\n\n  const textValues = Object.values(row)\n    .filter((value) => typeof value === 'string' && value.trim());\n\n  const translationHeuristic =\n    textValues.find((value) => /[А-ЯЁа-яё]{5,}/.test(value)) || null;\n\n  const packageHeuristic =\n    textValues.find((value) => /упаков|флакон|транспортн|группов|короб/i.test(String(value))) || null;\n\n  const itemNo = normalizeCode(\n    get(\n      'SKU',\n      'Item No.',\n      'itemNo',\n      'SKU Code - 2',\n      'SKU Code - 1',\n      'Артикул поставщика',\n      'Арт производителя',\n      'Артикул производителя',\n      'Vendor Code',\n      'ItemCode',\n      'SAP ItemCode'\n    )\n  );\n\n  const gtin = gtinToText(\n    get(\n      'Код товара',\n      'Barcode',\n      'BARCODE',\n      'GTIN',\n      'gtin',\n      'Штрихкод',\n      'Баркод',\n      'EAN'\n    )\n  );\n\n  if (!itemNo && !gtin) return null;\n\n  return {\n    itemNo: itemNo || null,\n    article: get(\n      'SKU RU',\n      'Артикул',\n      'АРТИКУЛ',\n      'article',\n      'Арт. Ру-Бьюти',\n      'Артикул РУ'\n    ),\n    gtin,\n    customsCode: get(\n      'Customs Code',\n      'Код ТНВЭД',\n      'Код ТНВЭД ',\n      'customsCode',\n      'Код ТНВЭД (13933)',\n      'ТНВЭД'\n    ),\n    translation: get(\n      'PRODUCT DESCRIPTION RU',\n      'Перевод',\n      'translation',\n      'Полное наименование товара (2478)',\n      'Наименование RU',\n      'Наименование'\n    ) || translationHeuristic || '',\n    packageDescription: get(\n      'PACKAGE DESCRIPTION RU',\n      'Пояснения к материалу и упаковке',\n      'ОПИСАНИЕ УПАКОВКИ',\n      'packageDescription',\n      'Пояснения к материалу и упаковке (для таможни)'\n    ) || packageHeuristic || '',\n    countryOfOrigin: normalizeCountry(\n      get(\n        'Country Of Origin',\n        'страна происхождения',\n        'countryOfOrigin',\n        'Страна происхождения'\n      )\n    ),\n    ds: get(\n      'Декларация о соответствии (23557)',\n      'ДС',\n      'СГР/деклация'\n    ),\n    dt: get(\n      'ДТ'\n    ),\n    tovar: get(\n      'ТОВАР',\n      'Товар'\n    ),\n    alcohol: get(\n      '% содержания спирта',\n      'Концентрация спирта',\n      'Alcohol',\n      'СПИРТ'\n    ),\n    dataMatrix: get(\n      'Data Matrix'\n    ),\n    label: get(\n      'этикетка',\n      'Этикетка'\n    ),\n  };\n};\n\nconst masterByItemNo = {};\nconst masterByGtin = {};\n\nfor (const row of masterRows) {\n  const normalized = detectMaster(row);\n  if (!normalized) continue;\n\n  if (normalized.itemNo) {\n    masterByItemNo[normalized.itemNo] = normalized;\n  }\n\n  if (normalized.gtin) {\n    masterByGtin[normalized.gtin] = normalized;\n  }\n}\n\nconst resolveMaster = ({ itemNo = null, gtin = null, batchBarcode = null } = {}) => {\n  const normalizedItemNo = itemNo ? normalizeCode(itemNo) : null;\n  const normalizedGtin = gtinToText(gtin);\n  const normalizedBatchBarcode = gtinToText(batchBarcode);\n\n  if (normalizedItemNo && masterByItemNo[normalizedItemNo]) {\n    return masterByItemNo[normalizedItemNo];\n  }\n\n  if (normalizedGtin && masterByGtin[normalizedGtin]) {\n    return masterByGtin[normalizedGtin];\n  }\n\n  if (normalizedBatchBarcode && masterByGtin[normalizedBatchBarcode]) {\n    return masterByGtin[normalizedBatchBarcode];\n  }\n\n  return null;\n};\n\nconst bundle = pythonData;\nconst hasAnyBatchFiles = Array.isArray(bundle.batchFiles) && bundle.batchFiles.length > 0;\n\nconst packingMap = {};\nfor (const row of bundle.packingRows || []) {\n  const normalizedCode = normalizeCode(row.itemNo);\n  if (!normalizedCode) continue;\n\n  if (!packingMap[normalizedCode]) {\n    packingMap[normalizedCode] = [];\n  }\n\n  packingMap[normalizedCode].push({\n    itemNo: normalizedCode,\n    boxes: parseNumber(row.boxes),\n    weight: parseNumber(row.weight),\n    quantity: parseNumber(row.quantity),\n    pallet: hasValue(row.pallet) ? String(row.pallet) : null,\n    descriptionFromPacking: clean(row.descriptionFromPacking),\n    sourceFileName: row.__sourceFileName || null,\n    nestedInCb: row.nestedInCb ?? null,\n  });\n}\n\nconst batchMap = {};\nfor (const row of bundle.batchRows || []) {\n  const normalizedCode = normalizeCode(row.itemNo || row.sapItemCode || row['SAP ItemCode']);\n  if (!normalizedCode) continue;\n\n  if (!batchMap[normalizedCode]) {\n    batchMap[normalizedCode] = [];\n  }\n\n  batchMap[normalizedCode].push({\n    itemNo: normalizedCode,\n    wmsItemCode: clean(row.wmsItemCode),\n    itemFrgnName: clean(row.itemFrgnName),\n    quantity: parseNumber(row.quantity),\n    batchNo: clean(row.batchNo),\n    prodDate: clean(row.prodDate),\n    expDate: clean(row.expDate),\n    barcode: gtinToText(row.barcode),\n    sourceFileName: row.__sourceFileName || null,\n  });\n}\n\nconst rawInvoiceRows = [...(bundle.invoiceRows || [])]\n  .map((row, idx) => ({\n    ...row,\n    __rowOrder: hasValue(row.__rowOrder) ? Number(row.__rowOrder) : idx + 1,\n    __isComponent: Boolean(row.__isComponent) || row.itemIndex === null || row.itemIndex === undefined || row.itemIndex === '',\n  }))\n  .sort((a, b) => {\n    const aOrder = hasValue(a.__rowOrder) ? Number(a.__rowOrder) : 999999;\n    const bOrder = hasValue(b.__rowOrder) ? Number(b.__rowOrder) : 999999;\n    if (aOrder !== bOrder) return aOrder - bOrder;\n    return String(a.itemNo || '').localeCompare(String(b.itemNo || ''));\n  });\n\nconst invoiceAgg = {};\nfor (const row of rawInvoiceRows) {\n  if (row.__isComponent) continue;\n\n  const itemNo = normalizeCode(row.itemNo);\n  if (!itemNo) continue;\n\n  if (!invoiceAgg[itemNo]) {\n    invoiceAgg[itemNo] = {\n      itemNo,\n      itemIndexes: [],\n      description: clean(row.description),\n      countryOfOrigin: clean(row.countryOfOrigin),\n      quantity: 0,\n      discountPercentage: parseNumber(row.discountPercentage),\n      unitPriceBeforeDiscount: parseNumber(row.unitPriceBeforeDiscount),\n      unitPriceAfterDiscount: parseNumber(row.unitPriceAfterDiscount),\n      totalBeforeDiscount: 0,\n      totalPriceAfterDiscount: 0,\n      commercialDiscount: 0,\n      warnings: [],\n      __firstRowOrder: hasValue(row.__rowOrder) ? Number(row.__rowOrder) : 999999,\n    };\n  }\n\n  const target = invoiceAgg[itemNo];\n\n  if (hasValue(row.itemIndex)) {\n    target.itemIndexes.push(Number(row.itemIndex));\n  }\n\n  if (!target.description && row.description) {\n    target.description = clean(row.description);\n  }\n\n  if (!target.countryOfOrigin && row.countryOfOrigin) {\n    target.countryOfOrigin = clean(row.countryOfOrigin);\n  }\n\n  target.quantity += parseNumber(row.quantity) || 0;\n  target.totalBeforeDiscount += parseNumber(row.totalBeforeDiscount) || 0;\n  target.totalPriceAfterDiscount += parseNumber(row.totalPriceAfterDiscount) || 0;\n  target.commercialDiscount += parseNumber(row.commercialDiscount) || 0;\n\n  const priceBefore = parseNumber(row.unitPriceBeforeDiscount);\n  if (target.unitPriceBeforeDiscount === null || target.unitPriceBeforeDiscount === undefined) {\n    target.unitPriceBeforeDiscount = priceBefore;\n  } else if (priceBefore !== null && target.unitPriceBeforeDiscount !== priceBefore) {\n    target.warnings.push('разные unit price before в invoice');\n  }\n\n  const priceAfter = parseNumber(row.unitPriceAfterDiscount);\n  if (target.unitPriceAfterDiscount === null || target.unitPriceAfterDiscount === undefined) {\n    target.unitPriceAfterDiscount = priceAfter;\n  } else if (priceAfter !== null && target.unitPriceAfterDiscount !== priceAfter) {\n    target.warnings.push('разные unit price after в invoice');\n  }\n\n  const discount = parseNumber(row.discountPercentage);\n  if (target.discountPercentage === null || target.discountPercentage === undefined) {\n    target.discountPercentage = discount;\n  } else if (discount !== null && target.discountPercentage !== discount) {\n    target.warnings.push('разный discount % в invoice');\n  }\n}\n\nconst aggregatedMainRows = Object.values(invoiceAgg).sort((a, b) => {\n  if (a.__firstRowOrder !== b.__firstRowOrder) return a.__firstRowOrder - b.__firstRowOrder;\n  return String(a.itemNo).localeCompare(String(b.itemNo));\n});\n\nconst mainMap = {};\nfor (const row of aggregatedMainRows) {\n  mainMap[row.itemNo] = row;\n}\n\nconst displaySequence = [];\nconst emittedMain = new Set();\n\nfor (const row of rawInvoiceRows) {\n  const itemNo = normalizeCode(row.itemNo);\n  if (!itemNo) continue;\n\n  if (row.__isComponent) {\n    displaySequence.push({\n      type: 'component',\n      row,\n      itemNo,\n      rowOrder: hasValue(row.__rowOrder) ? Number(row.__rowOrder) : 999999,\n    });\n    continue;\n  }\n\n  if (!emittedMain.has(itemNo) && mainMap[itemNo]) {\n    emittedMain.add(itemNo);\n    displaySequence.push({\n      type: 'main',\n      row: mainMap[itemNo],\n      itemNo,\n      rowOrder: mainMap[itemNo].__firstRowOrder,\n    });\n  }\n}\n\nconst aggregatePackingTotals = (rows) => {\n  if (!rows.length) {\n    return {\n      quantity: null,\n      boxes: null,\n      weight: null,\n      pallets: [],\n    };\n  }\n\n  let quantity = 0;\n  let boxes = 0;\n  let weight = 0;\n\n  let hasQuantity = false;\n  let hasBoxes = false;\n  let hasWeight = false;\n\n  for (const row of rows) {\n    if (row.quantity !== null && row.quantity !== undefined) {\n      quantity += row.quantity;\n      hasQuantity = true;\n    }\n    if (row.boxes !== null && row.boxes !== undefined) {\n      boxes += row.boxes;\n      hasBoxes = true;\n    }\n    if (row.weight !== null && row.weight !== undefined) {\n      weight += row.weight;\n      hasWeight = true;\n    }\n  }\n\n  return {\n    quantity: hasQuantity ? quantity : null,\n    boxes: hasBoxes ? boxes : null,\n    weight: hasWeight ? weight : null,\n    pallets: uniqSorted(rows.map((row) => row.pallet)),\n  };\n};\n\nconst splitPackingByPallet = (rows) => {\n  const byPallet = {};\n\n  for (const row of rows) {\n    const palletKey = row.pallet || 'без паллеты';\n    if (!byPallet[palletKey]) {\n      byPallet[palletKey] = {\n        quantity: 0,\n        boxes: 0,\n        weight: 0,\n        hasQuantity: false,\n        hasBoxes: false,\n        hasWeight: false,\n      };\n    }\n\n    if (row.quantity !== null && row.quantity !== undefined) {\n      byPallet[palletKey].quantity += row.quantity;\n      byPallet[palletKey].hasQuantity = true;\n    }\n    if (row.boxes !== null && row.boxes !== undefined) {\n      byPallet[palletKey].boxes += row.boxes;\n      byPallet[palletKey].hasBoxes = true;\n    }\n    if (row.weight !== null && row.weight !== undefined) {\n      byPallet[palletKey].weight += row.weight;\n      byPallet[palletKey].hasWeight = true;\n    }\n  }\n\n  return Object.entries(byPallet)\n    .sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true }))\n    .map(([palletKey, totals]) => ({\n      palletKey,\n      quantity: totals.hasQuantity ? totals.quantity : null,\n      boxes: totals.hasBoxes ? totals.boxes : null,\n      weight: totals.hasWeight ? totals.weight : null,\n    }));\n};\n\nconst buildComponentCustomsRow = (row) => {\n  const itemNo = normalizeCode(row.itemNo);\n  const master = resolveMaster({ itemNo });\n  const masterMissing = !master;\n  const articleMissing = !hasValue(master?.article);\n  const translationMissing = !hasValue(master?.translation);\n  const packageMissing = !hasValue(master?.packageDescription);\n\n  const warnings = [];\n  if (masterMissing) warnings.push(`нет строки в справочнике для ${itemNo}`);\n  if (!masterMissing && articleMissing) warnings.push('пустой артикул в справочнике');\n  if (!masterMissing && translationMissing) warnings.push('пустой перевод в справочнике');\n  if (!masterMissing && packageMissing) warnings.push('пустые пояснения к материалу и упаковке');\n\n  return {\n    '#': null,\n    'Item No.': itemNo,\n    'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n    'Description': clean(row.description) || null,\n    'Перевод': master?.translation ?? '',\n    'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n    'Country Of Origin': master?.countryOfOrigin || normalizeCountry(row.countryOfOrigin),\n    'Quantity Количество': parseNumber(row.quantity),\n    'Unit Price Before Discount': parseNumber(row.unitPriceBeforeDiscount) ?? null,\n    'Total Before Discount': round2(parseNumber(row.totalBeforeDiscount)) ?? null,\n    'Discount Percentage, %': parseNumber(row.discountPercentage) !== null\n      ? `${Number(parseNumber(row.discountPercentage)).toFixed(2)} %`\n      : null,\n    'Unit Price After Discount': parseNumber(row.unitPriceAfterDiscount) ?? null,\n    'Total,$': round2(parseNumber(row.totalPriceAfterDiscount ?? row.totalBeforeDiscount)) ?? null,\n    'Commercial Discount, $': round2(parseNumber(row.commercialDiscount)) ?? null,\n    'Количество коробок, шт.': null,\n    'Вес, кг': null,\n    '№ паллета': null,\n\n    '__row_warning': warnings.length > 0,\n    '__error_article': masterMissing || articleMissing,\n    '__error_qty': false,\n    '__warning_nested_cb': false,\n    '__warning_boxes_zero': false,\n    '__warning_boxes_missing': false,\n    '__warning_weight_zero': false,\n    '__warning_weight_missing': false,\n    '__warning_reason': warnings.join(' | ') || null,\n  };\n};\n\nconst buildComponentCzRows = (row) => {\n  const itemNo = normalizeCode(row.itemNo);\n  const master = resolveMaster({ itemNo });\n  const masterMissing = !master;\n  const articleMissing = !hasValue(master?.article);\n  const translationMissing = !hasValue(master?.translation);\n  const packageMissing = !hasValue(master?.packageDescription);\n  const customsCodeText = hasValue(master?.customsCode) ? String(master.customsCode).trim() : null;\n  const gtinText = gtinToText(master?.gtin);\n  const batchRowsForItem = batchMap[itemNo] || [];\n\n  const buildWarnings = (finalGtin) => {\n    const warnings = [];\n    if (masterMissing) warnings.push(`нет строки в справочнике для ${itemNo}`);\n    if (!masterMissing && articleMissing) warnings.push('пустой артикул в справочнике');\n    if (!masterMissing && translationMissing) warnings.push('пустой перевод в справочнике');\n    if (!masterMissing && packageMissing) warnings.push('пустые пояснения к материалу и упаковке');\n    if (!customsCodeText) warnings.push('не заполнен Код ТНВЭД');\n    if (hasAnyBatchFiles && !batchRowsForItem.length) warnings.push(`нет строки в batch для ${itemNo}`);\n    if (!finalGtin) warnings.push('не заполнен GTIN');\n    return warnings;\n  };\n\n  const makeRow = (batchRow) => {\n    const finalGtin = gtinText || (batchRow?.barcode) || null;\n    const rowWarnings = buildWarnings(finalGtin);\n    const baseQty = parseNumber(row.quantity) ?? 0;\n    const batchQty = batchRow ? batchRow.quantity : null;\n    const qty = batchQty ?? (baseQty || null);\n    const share = (baseQty && batchQty != null) ? batchQty / baseQty : null;\n\n    return {\n      '#': null,\n      'Item No.': itemNo,\n      'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n      'Код ТНВЭД': customsCodeText,\n      'GTIN': finalGtin ? `'${finalGtin}` : null,\n      'Description': clean(row.description) || null,\n      'Перевод': master?.translation ?? '',\n      'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n      'Country Of Origin': master?.countryOfOrigin || normalizeCountry(row.countryOfOrigin),\n      'Quantity Количество': qty,\n      'Unit Price Before Discount': parseNumber(row.unitPriceBeforeDiscount) ?? null,\n      'Total Before Discount': share\n        ? round2(Number(parseNumber(row.totalBeforeDiscount) || 0) * share)\n        : (round2(parseNumber(row.totalBeforeDiscount)) ?? null),\n      'Discount Percentage, %': parseNumber(row.discountPercentage) !== null\n        ? `${Number(parseNumber(row.discountPercentage)).toFixed(2)} %`\n        : null,\n      'Unit Price After Discount': parseNumber(row.unitPriceAfterDiscount) ?? null,\n      'Total,$': share\n        ? round2(Number(parseNumber(row.totalPriceAfterDiscount ?? row.totalBeforeDiscount) || 0) * share)\n        : (round2(parseNumber(row.totalPriceAfterDiscount ?? row.totalBeforeDiscount)) ?? null),\n      'Commercial Discount, $': share\n        ? round2(Number(parseNumber(row.commercialDiscount) || 0) * share)\n        : (round2(parseNumber(row.commercialDiscount)) ?? null),\n      'Количество коробок, шт.': null,\n      'Вес, кг': null,\n      '№ паллета': null,\n      'Batch No': batchRow?.batchNo || null,\n      'Prod. date': batchRow?.prodDate || null,\n      'Exp. Date': batchRow?.expDate || null,\n      'Data Matrix': master?.dataMatrix ?? null,\n      'этикетка': master?.label ?? null,\n      '% содержания спирта': master?.alcohol ?? null,\n      'ДС': master?.ds ?? null,\n      'ДТ': master?.dt ?? null,\n      'ТОВАР': master?.tovar || clean(row.description) || null,\n\n      '__row_warning': rowWarnings.length > 0,\n      '__error_article': masterMissing || articleMissing,\n      '__error_tnved': !customsCodeText,\n      '__error_gtin': !finalGtin,\n      '__warning_nested_cb': false,\n      '__warning_boxes_zero': false,\n      '__warning_boxes_missing': false,\n      '__warning_weight_zero': false,\n      '__warning_weight_missing': false,\n      '__warning_reason': rowWarnings.join(' | ') || null,\n    };\n  };\n\n  if (batchRowsForItem.length) {\n    return batchRowsForItem.map((b) => makeRow(b));\n  }\n  return [makeRow(null)];\n};\n\nconst customsRows = [];\nlet customsIndex = 1;\n\nfor (const entry of displaySequence) {\n  if (entry.type === 'component') {\n    customsRows.push(buildComponentCustomsRow(entry.row));\n    continue;\n  }\n\n  const invoiceRow = entry.row;\n  const itemNo = invoiceRow.itemNo;\n  const batchRows = batchMap[itemNo] || [];\n  const packingRows = packingMap[itemNo] || [];\n  const fallbackBatchBarcode = batchRows.find((r) => r.barcode)?.barcode || null;\n  const master = resolveMaster({ itemNo, batchBarcode: fallbackBatchBarcode });\n  const packingTotals = aggregatePackingTotals(packingRows);\n\n  const qtyScale = (packingTotals.quantity && invoiceRow.quantity !== null && invoiceRow.quantity !== undefined && Number(packingTotals.quantity) !== Number(invoiceRow.quantity))\n    ? Number(invoiceRow.quantity) / Number(packingTotals.quantity)\n    : 1;\n\n  const rowWarnings = [];\n\n  const masterMissing = !master;\n  const articleMissing = !hasValue(master?.article);\n  const translationMissing = !hasValue(master?.translation);\n  const packageMissing = !hasValue(master?.packageDescription);\n\n  const packingMissing = !packingRows.length;\n  const qtyMismatch =\n    packingTotals.quantity !== null &&\n    invoiceRow.quantity !== null &&\n    invoiceRow.quantity !== undefined &&\n    Number(packingTotals.quantity) !== Number(invoiceRow.quantity);\n\n  const hasNestedInCb = packingRows.some((r) => hasValue(r.nestedInCb));\n  const hasZeroBoxes = packingRows.some((r) => r.boxes === 0);\n  const hasMissingBoxes = packingRows.some((r) => r.boxes === null || r.boxes === undefined);\n  const hasZeroWeight = packingRows.some((r) => r.weight === 0);\n  const hasMissingWeight = packingRows.some((r) => r.weight === null || r.weight === undefined);\n\n  if (masterMissing) rowWarnings.push(`нет строки в справочнике для ${itemNo}`);\n  if (!masterMissing && articleMissing) rowWarnings.push('пустой артикул в справочнике');\n  if (!masterMissing && translationMissing) rowWarnings.push('пустой перевод в справочнике');\n  if (!masterMissing && packageMissing) rowWarnings.push('пустые пояснения к материалу и упаковке');\n  if (packingMissing) rowWarnings.push(`нет строки в packing для ${itemNo}`);\n  if (qtyMismatch) rowWarnings.push(`qty invoice=${invoiceRow.quantity}, packing=${packingTotals.quantity}`);\n  if (hasNestedInCb) rowWarnings.push('есть вложение IN CB');\n  if (hasZeroBoxes) rowWarnings.push('есть строка с boxes=0');\n  if (hasMissingBoxes) rowWarnings.push('есть строка без значения boxes');\n  if (hasZeroWeight) rowWarnings.push('есть строка с weight=0');\n  if (hasMissingWeight) rowWarnings.push('есть строка без значения weight');\n\n  const articleValue = hasValue(master?.article) ? String(master.article).trim() : null;\n\n  customsRows.push({\n    '#': customsIndex++,\n    'Item No.': itemNo,\n    'Артикул': articleValue,\n    'Description': invoiceRow.description || (packingRows[0]?.descriptionFromPacking ?? ''),\n    'Перевод': master?.translation ?? '',\n    'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n    'Country Of Origin': master?.countryOfOrigin || normalizeCountry(invoiceRow.countryOfOrigin),\n    'Quantity Количество': invoiceRow.quantity ?? null,\n    'Unit Price Before Discount': invoiceRow.unitPriceBeforeDiscount ?? null,\n    'Total Before Discount': round2(invoiceRow.totalBeforeDiscount),\n    'Discount Percentage, %':\n      invoiceRow.discountPercentage !== null && invoiceRow.discountPercentage !== undefined\n        ? `${Number(invoiceRow.discountPercentage).toFixed(2)} %`\n        : null,\n    'Unit Price After Discount': invoiceRow.unitPriceAfterDiscount ?? null,\n    'Total,$': round2(invoiceRow.totalPriceAfterDiscount || invoiceRow.totalBeforeDiscount),\n    'Commercial Discount, $': round2(invoiceRow.commercialDiscount),\n    'Количество коробок, шт.': packingTotals.boxes !== null ? Math.max(1, Math.round(packingTotals.boxes * qtyScale)) : null,\n    'Вес, кг': packingTotals.weight !== null ? Number((packingTotals.weight * qtyScale).toFixed(3)) : null,\n    '№ паллета': packingTotals.pallets.join('; ') || null,\n\n    '__row_warning': rowWarnings.length > 0,\n    '__error_article': masterMissing || articleMissing,\n    '__error_qty': qtyMismatch,\n    '__warning_nested_cb': hasNestedInCb,\n    '__warning_boxes_zero': hasZeroBoxes,\n    '__warning_boxes_missing': hasMissingBoxes,\n    '__warning_weight_zero': hasZeroWeight,\n    '__warning_weight_missing': hasMissingWeight,\n    '__warning_reason': rowWarnings.join(' | ') || null,\n  });\n}\n\nconst czRows = [];\nlet czIndex = 1;\n\nfor (const entry of displaySequence) {\n  if (entry.type === 'component') {\n    for (const r of buildComponentCzRows(entry.row)) {\n      czRows.push(r);\n    }\n    continue;\n  }\n\n  const invoiceRow = entry.row;\n  const itemNo = invoiceRow.itemNo;\n  const packingRows = packingMap[itemNo] || [];\n  const batchRows = batchMap[itemNo] || [];\n  const fallbackBatchBarcode = batchRows.find((r) => r.barcode)?.barcode || null;\n  const master = resolveMaster({ itemNo, batchBarcode: fallbackBatchBarcode });\n\n  const masterMissing = !master;\n  const articleMissing = !hasValue(master?.article);\n  const translationMissing = !hasValue(master?.translation);\n  const packageMissing = !hasValue(master?.packageDescription);\n  const customsCodeText = hasValue(master?.customsCode) ? String(master.customsCode).trim() : null;\n  const gtinText = gtinToText(master?.gtin);\n\n  const hasNestedInCb = packingRows.some((r) => hasValue(r.nestedInCb));\n  const hasZeroBoxes = packingRows.some((r) => r.boxes === 0);\n  const hasMissingBoxes = packingRows.some((r) => r.boxes === null || r.boxes === undefined);\n  const hasZeroWeight = packingRows.some((r) => r.weight === 0);\n  const hasMissingWeight = packingRows.some((r) => r.weight === null || r.weight === undefined);\n\n  const buildBaseCzWarnings = () => {\n    const warnings = [];\n\n    if (masterMissing) warnings.push(`нет строки в справочнике для ${itemNo}`);\n    if (!masterMissing && articleMissing) warnings.push('пустой артикул в справочнике');\n    if (!masterMissing && translationMissing) warnings.push('пустой перевод в справочнике');\n    if (!masterMissing && packageMissing) warnings.push('пустые пояснения к материалу и упаковке');\n    if (!customsCodeText) warnings.push('не заполнен Код ТНВЭД');\n    if (!packingRows.length) warnings.push(`нет строки в packing для ${itemNo}`);\n    if (hasAnyBatchFiles && !batchRows.length) warnings.push(`нет строки в batch для ${itemNo}`);\n    if (hasNestedInCb) warnings.push('есть вложение IN CB');\n    if (hasZeroBoxes) warnings.push('есть строка с boxes=0');\n    if (hasMissingBoxes) warnings.push('есть строка без значения boxes');\n    if (hasZeroWeight) warnings.push('есть строка с weight=0');\n    if (hasMissingWeight) warnings.push('есть строка без значения weight');\n\n    return warnings;\n  };\n\n  if (batchRows.length) {\n    for (const batch of batchRows) {\n      const baseQty = Number(invoiceRow.quantity || 0);\n      const share =\n        baseQty && batch.quantity !== null && batch.quantity !== undefined\n          ? Number(batch.quantity) / baseQty\n          : null;\n\n      const finalGtin = gtinText || batch.barcode || null;\n      const rowWarnings = buildBaseCzWarnings();\n      if (!finalGtin) rowWarnings.push('не заполнен GTIN');\n\n      const packingTotals = aggregatePackingTotals(packingRows);\n      const czQtyScale = (packingTotals.quantity && invoiceRow.quantity !== null && invoiceRow.quantity !== undefined && Number(packingTotals.quantity) !== Number(invoiceRow.quantity))\n        ? Number(invoiceRow.quantity) / Number(packingTotals.quantity)\n        : 1;\n\n      czRows.push({\n        '#': czIndex++,\n        'Item No.': itemNo,\n        'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n        'Код ТНВЭД': customsCodeText,\n        'GTIN': finalGtin ? `'${finalGtin}` : null,\n        'Description': invoiceRow.description || null,\n        'Перевод': master?.translation ?? '',\n        'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n        'Country Of Origin': master?.countryOfOrigin || normalizeCountry(invoiceRow.countryOfOrigin),\n        'Quantity Количество': batch.quantity ?? invoiceRow.quantity ?? null,\n        'Unit Price Before Discount': invoiceRow.unitPriceBeforeDiscount ?? null,\n        'Total Before Discount': share\n          ? round2(Number(invoiceRow.totalBeforeDiscount) * share)\n          : round2(invoiceRow.totalBeforeDiscount),\n        'Discount Percentage, %':\n          invoiceRow.discountPercentage !== null && invoiceRow.discountPercentage !== undefined\n            ? `${Number(invoiceRow.discountPercentage).toFixed(2)} %`\n            : null,\n        'Unit Price After Discount': invoiceRow.unitPriceAfterDiscount ?? null,\n        'Total,$': share\n          ? round2(Number(invoiceRow.totalPriceAfterDiscount || invoiceRow.totalBeforeDiscount) * share)\n          : round2(invoiceRow.totalPriceAfterDiscount || invoiceRow.totalBeforeDiscount),\n        'Commercial Discount, $': share\n          ? round2(Number(invoiceRow.commercialDiscount || 0) * share)\n          : round2(invoiceRow.commercialDiscount),\n        'Количество коробок, шт.': packingTotals.boxes !== null ? Math.max(1, Math.round(packingTotals.boxes * czQtyScale)) : null,\n        'Вес, кг': packingTotals.weight !== null ? Number((packingTotals.weight * czQtyScale).toFixed(3)) : null,\n        '№ паллета': packingTotals.pallets.join('; ') || null,\n        'Batch No': batch.batchNo || null,\n        'Prod. date': batch.prodDate || null,\n        'Exp. Date': batch.expDate || null,\n        'Data Matrix': master?.dataMatrix ?? null,\n        'этикетка': master?.label ?? null,\n        '% содержания спирта': master?.alcohol ?? null,\n        'ДС': master?.ds ?? null,\n        'ДТ': master?.dt ?? null,\n        'ТОВАР': master?.tovar || batch.itemFrgnName || invoiceRow.description || null,\n\n        '__row_warning': rowWarnings.length > 0,\n        '__error_article': masterMissing || articleMissing,\n        '__error_tnved': !customsCodeText,\n        '__error_gtin': !finalGtin,\n        '__warning_nested_cb': hasNestedInCb,\n        '__warning_boxes_zero': hasZeroBoxes,\n        '__warning_boxes_missing': hasMissingBoxes,\n        '__warning_weight_zero': hasZeroWeight,\n        '__warning_weight_missing': hasMissingWeight,\n        '__warning_reason': rowWarnings.join(' | ') || null,\n      });\n    }\n  } else if (!packingRows.length) {\n    const finalGtin = gtinText || null;\n    const rowWarnings = buildBaseCzWarnings();\n    if (!finalGtin) rowWarnings.push('не заполнен GTIN');\n\n    czRows.push({\n      '#': czIndex++,\n      'Item No.': itemNo,\n      'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n      'Код ТНВЭД': customsCodeText,\n      'GTIN': finalGtin ? `'${finalGtin}` : null,\n      'Description': invoiceRow.description || null,\n      'Перевод': master?.translation ?? '',\n      'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n      'Country Of Origin': master?.countryOfOrigin || normalizeCountry(invoiceRow.countryOfOrigin),\n      'Quantity Количество': invoiceRow.quantity ?? null,\n      'Unit Price Before Discount': invoiceRow.unitPriceBeforeDiscount ?? null,\n      'Total Before Discount': round2(invoiceRow.totalBeforeDiscount),\n      'Discount Percentage, %':\n        invoiceRow.discountPercentage !== null && invoiceRow.discountPercentage !== undefined\n          ? `${Number(invoiceRow.discountPercentage).toFixed(2)} %`\n          : null,\n      'Unit Price After Discount': invoiceRow.unitPriceAfterDiscount ?? null,\n      'Total,$': round2(invoiceRow.totalPriceAfterDiscount || invoiceRow.totalBeforeDiscount),\n      'Commercial Discount, $': round2(invoiceRow.commercialDiscount),\n      'Количество коробок, шт.': null,\n      'Вес, кг': null,\n      '№ паллета': null,\n      'Batch No': null,\n      'Prod. date': null,\n      'Exp. Date': null,\n      'Data Matrix': master?.dataMatrix ?? null,\n      'этикетка': master?.label ?? null,\n      '% содержания спирта': master?.alcohol ?? null,\n      'ДС': master?.ds ?? null,\n      'ДТ': master?.dt ?? null,\n      'ТОВАР': master?.tovar || invoiceRow.description || null,\n\n      '__row_warning': rowWarnings.length > 0,\n      '__error_article': masterMissing || articleMissing,\n      '__error_tnved': !customsCodeText,\n      '__error_gtin': !finalGtin,\n      '__warning_nested_cb': hasNestedInCb,\n      '__warning_boxes_zero': hasZeroBoxes,\n      '__warning_boxes_missing': hasMissingBoxes,\n      '__warning_weight_zero': hasZeroWeight,\n      '__warning_weight_missing': hasMissingWeight,\n      '__warning_reason': rowWarnings.join(' | ') || null,\n    });\n  } else {\n    const palletSplits = splitPackingByPallet(packingRows);\n    const czPackingTotals = aggregatePackingTotals(packingRows);\n    const czPackingTotalQty = czPackingTotals.quantity;\n    const czBaseQty = Number(invoiceRow.quantity || 0);\n    const czQtyScale = (czPackingTotalQty && czBaseQty && Number(czPackingTotalQty) !== czBaseQty)\n      ? czBaseQty / Number(czPackingTotalQty)\n      : 1;\n\n    for (const split of palletSplits) {\n      const baseQty = czBaseQty;\n      const palletProportion = (czPackingTotalQty && split.quantity !== null && split.quantity !== undefined)\n        ? Number(split.quantity) / Number(czPackingTotalQty)\n        : null;\n      const invoicePalletQty = (palletProportion !== null && czBaseQty)\n        ? round2(czBaseQty * palletProportion)\n        : split.quantity ?? czBaseQty;\n      const share = palletProportion !== null\n        ? palletProportion\n        : (baseQty && split.quantity !== null && split.quantity !== undefined\n            ? Number(split.quantity) / baseQty\n            : null);\n\n      const finalGtin = gtinText || null;\n      const rowWarnings = buildBaseCzWarnings();\n      if (!finalGtin) rowWarnings.push('не заполнен GTIN');\n\n      czRows.push({\n        '#': czIndex++,\n        'Item No.': itemNo,\n        'Артикул': hasValue(master?.article) ? String(master.article).trim() : null,\n        'Код ТНВЭД': customsCodeText,\n        'GTIN': finalGtin ? `'${finalGtin}` : null,\n        'Description': invoiceRow.description || null,\n        'Перевод': master?.translation ?? '',\n        'Пояснения к материалу и упаковке': master?.packageDescription ?? '',\n        'Country Of Origin': master?.countryOfOrigin || normalizeCountry(invoiceRow.countryOfOrigin),\n        'Quantity Количество': invoicePalletQty,\n        'Unit Price Before Discount': invoiceRow.unitPriceBeforeDiscount ?? null,\n        'Total Before Discount': share\n          ? round2(Number(invoiceRow.totalBeforeDiscount) * share)\n          : round2(invoiceRow.totalBeforeDiscount),\n        'Discount Percentage, %':\n          invoiceRow.discountPercentage !== null && invoiceRow.discountPercentage !== undefined\n            ? `${Number(invoiceRow.discountPercentage).toFixed(2)} %`\n            : null,\n        'Unit Price After Discount': invoiceRow.unitPriceAfterDiscount ?? null,\n        'Total,$': share\n          ? round2(Number(invoiceRow.totalPriceAfterDiscount || invoiceRow.totalBeforeDiscount) * share)\n          : round2(invoiceRow.totalPriceAfterDiscount || invoiceRow.totalBeforeDiscount),\n        'Commercial Discount, $': share\n          ? round2(Number(invoiceRow.commercialDiscount || 0) * share)\n          : round2(invoiceRow.commercialDiscount),\n        'Количество коробок, шт.': split.boxes !== null ? Math.max(1, Math.round(split.boxes * czQtyScale)) : null,\n        'Вес, кг': split.weight !== null ? Number((split.weight * czQtyScale).toFixed(3)) : null,\n        '№ паллета': split.palletKey === 'без паллеты' ? null : split.palletKey,\n        'Batch No': null,\n        'Prod. date': null,\n        'Exp. Date': null,\n        'Data Matrix': master?.dataMatrix ?? null,\n        'этикетка': master?.label ?? null,\n        '% содержания спирта': master?.alcohol ?? null,\n        'ДС': master?.ds ?? null,\n        'ДТ': master?.dt ?? null,\n        'ТОВАР': master?.tovar || invoiceRow.description || null,\n\n        '__row_warning': rowWarnings.length > 0,\n        '__error_article': masterMissing || articleMissing,\n        '__error_tnved': !customsCodeText,\n        '__error_gtin': !finalGtin,\n        '__warning_nested_cb': hasNestedInCb,\n        '__warning_boxes_zero': hasZeroBoxes,\n        '__warning_boxes_missing': hasMissingBoxes,\n        '__warning_weight_zero': hasZeroWeight,\n        '__warning_weight_missing': hasMissingWeight,\n        '__warning_reason': rowWarnings.join(' | ') || null,\n      });\n    }\n  }\n}\n\nreturn [{\n  json: {\n    shipmentKey: bundle.shipmentKey,\n    invoiceNo: bundle.invoiceNo,\n    invoiceDocsCount: bundle.invoiceDocsCount,\n    packingDocsCount: bundle.packingDocsCount,\n    batchDocsCount: bundle.batchDocsCount || 0,\n    customsRows,\n    czRows,\n    warnings: bundle.warnings || [],\n    chatId: bundle.chatId,\n  }\n}];"
+      },
+      "id": "207dabf2-94e9-4f75-9c4b-8fc3d842d938",
+      "name": "Build Moroccanoil Customs and CZ Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1776,
+        1584
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Moroccanoil Customs and CZ Rows').first().json;\n\nif (!data || !data.shipmentKey) {\n  throw new Error('Нет shipmentKey после Build Moroccanoil Customs and CZ Rows');\n}\n\nreturn [{\n  json: {\n    spreadsheetId: '1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI',\n    shipmentKey: String(data.shipmentKey),\n    customsSheetName: String(data.shipmentKey),\n    czSheetName: `ЧЗ ${String(data.shipmentKey)}`,\n    templateCustomsName: 'TEMPLATE_CUSTOMS',\n    templateCzName: 'TEMPLATE_CZ',\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1568,
+        1584
+      ],
+      "id": "57001895-61b0-4578-8afb-cbe4bf547d52",
+      "name": "Prepare Sheet Setup Data - MOROCCANOIL"
+    },
+    {
+      "parameters": {
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{$json.spreadsheetId}}?fields=sheets.properties(sheetId,title,index,hidden)",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1360,
+        1584
+      ],
+      "id": "ecd6ca12-269b-45c9-bbc7-71d9d31a9c83",
+      "name": "Get Spreadsheet Metadata - MOROCCANOIL",
+      "credentials": {
+        "googleApi": {
+          "id": "3LOHOCZ59mCHy9dU",
+          "name": "Google API SA"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const meta = $json;\nconst setup = $('Prepare Sheet Setup Data - MOROCCANOIL').first().json;\n\nconst sheets = Array.isArray(meta.sheets) ? meta.sheets : [];\nconst titleToSheetId = new Map();\n\nfor (const sheet of sheets) {\n  const props = sheet.properties || {};\n  if (props.title) {\n    titleToSheetId.set(props.title, props.sheetId);\n  }\n}\n\nconst customsExists = titleToSheetId.has(setup.customsSheetName);\nconst czExists = titleToSheetId.has(setup.czSheetName);\n\nconst templateCustomsSheetId = titleToSheetId.get(setup.templateCustomsName);\nconst templateCzSheetId = titleToSheetId.get(setup.templateCzName);\n\nif (templateCustomsSheetId === undefined) {\n  throw new Error(`Не найден шаблонный лист ${setup.templateCustomsName}`);\n}\n\nif (templateCzSheetId === undefined) {\n  throw new Error(`Не найден шаблонный лист ${setup.templateCzName}`);\n}\n\nconst requests = [];\n\nif (!customsExists) {\n  requests.push({\n    duplicateSheet: {\n      sourceSheetId: templateCustomsSheetId,\n      newSheetName: setup.customsSheetName,\n    }\n  });\n}\n\nif (!czExists) {\n  requests.push({\n    duplicateSheet: {\n      sourceSheetId: templateCzSheetId,\n      newSheetName: setup.czSheetName,\n    }\n  });\n}\n\nreturn [{\n  json: {\n    ...setup,\n    customsExists,\n    czExists,\n    templateCustomsSheetId,\n    templateCzSheetId,\n    requests,\n    requestsCount: requests.length,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1152,
+        1584
+      ],
+      "id": "5712af0d-00dc-49eb-aa88-7be030808d7d",
+      "name": "Build Create Requests - MOROCCANOIL"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "906c7872-2d09-4be3-8f39-cbd4e128dae3",
+              "leftValue": "={{ $json.requestsCount }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -944,
+        1584
+      ],
+      "id": "5a2c64f8-8eae-46d2-b027-f13da6c1d593",
+      "name": "If Need Create Sheets? - MOROCCANOIL"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{$json.spreadsheetId}}:batchUpdate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { requests: $json.requests } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -752,
+        1488
+      ],
+      "id": "9a1a2481-929d-4bd5-94cc-8fecdf6b41e8",
+      "name": "Create Missing Sheets - MOROCCANOIL",
+      "credentials": {
+        "googleApi": {
+          "id": "3LOHOCZ59mCHy9dU",
+          "name": "Google API SA"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: $('Build Moroccanoil Customs and CZ Rows').first().json\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -576,
+        1600
+      ],
+      "id": "29f89d03-03f5-43bb-a40e-1bd3b414578d",
+      "name": "Continue After Sheet Ensure - MOROCCANOIL"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI",
+          "mode": "list",
+          "cachedResultName": "moroccanoil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{$json.shipmentKey}}",
+          "mode": "name"
+        }
+      },
+      "id": "80661381-258c-47bc-a18b-fc37cbd7cce5",
+      "name": "Clear Customs Sheet - MOROCCANOIL",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -320,
+        1472
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Moroccanoil Customs and CZ Rows').first().json;\nreturn (data.customsRows || []).map(row => ({ json: { ...row } }));"
+      },
+      "id": "fa01eeb6-f2d7-42f4-8103-adf2d8b3159f",
+      "name": "Prepare Customs Rows - MOROCCANOIL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        1472
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI",
+          "mode": "list",
+          "cachedResultName": "moroccanoil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Build Moroccanoil Customs and CZ Rows').first().json.shipmentKey }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "id": "c8f2a8de-c61b-48a9-a4c1-87eecb3078a2",
+      "name": "Write Customs Rows - MOROCCANOIL",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        128,
+        1472
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI",
+          "mode": "list",
+          "cachedResultName": "moroccanoil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ \"ЧЗ \" + $json.shipmentKey }}"
+        }
+      },
+      "id": "f2ecc2c3-dcfa-42f4-86ea-7a09d550b6d9",
+      "name": "Clear CZ Sheet - MOROCCANOIL",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -320,
+        1664
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Moroccanoil Customs and CZ Rows').first().json;\nreturn (data.czRows || []).map(row => ({ json: { ...row } }));"
+      },
+      "id": "1aaf918a-8c8c-45bb-bd76-4d80764f84ae",
+      "name": "Prepare CZ Rows - MOROCCANOIL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        1664
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI",
+          "mode": "list",
+          "cachedResultName": "moroccanoil",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1qMNUVwizL6okhjiTI6ViEbdVHAIc-prkqnAcYQkwEmI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ 'ЧЗ ' + $('Build Moroccanoil Customs and CZ Rows').first().json.shipmentKey }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "#",
+              "displayName": "#",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Item No.",
+              "displayName": "Item No.",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Артикул",
+              "displayName": "Артикул",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Код ТНВЭД",
+              "displayName": "Код ТНВЭД",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "GTIN",
+              "displayName": "GTIN",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Description",
+              "displayName": "Description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Перевод",
+              "displayName": "Перевод",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Пояснения к материалу и упаковке",
+              "displayName": "Пояснения к материалу и упаковке",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Country Of Origin",
+              "displayName": "Country Of Origin",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Quantity Количество",
+              "displayName": "Quantity Количество",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Unit Price Before Discount",
+              "displayName": "Unit Price Before Discount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total Before Discount",
+              "displayName": "Total Before Discount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Discount Percentage, %",
+              "displayName": "Discount Percentage, %",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Unit Price After Discount",
+              "displayName": "Unit Price After Discount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total,$",
+              "displayName": "Total,$",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Commercial Discount, $",
+              "displayName": "Commercial Discount, $",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Количество коробок, шт.",
+              "displayName": "Количество коробок, шт.",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Вес, кг",
+              "displayName": "Вес, кг",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "№ паллета",
+              "displayName": "№ паллета",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Batch No",
+              "displayName": "Batch No",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Prod. date",
+              "displayName": "Prod. date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Exp. Date",
+              "displayName": "Exp. Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Data Matrix",
+              "displayName": "Data Matrix",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "этикетка",
+              "displayName": "этикетка",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "% содержания спирта",
+              "displayName": "% содержания спирта",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ДС",
+              "displayName": "ДС",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ДТ",
+              "displayName": "ДТ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ТОВАР",
+              "displayName": "ТОВАР",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "__row_warning",
+              "displayName": "__row_warning",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "__error_article",
+              "displayName": "__error_article",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "__error_tnved",
+              "displayName": "__error_tnved",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "__error_gtin",
+              "displayName": "__error_gtin",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "__warning_reason",
+              "displayName": "__warning_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "id": "cea68969-39de-4b3f-b27a-48939f79a6a6",
+      "name": "Write CZ Rows - MOROCCANOIL",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        128,
+        1664
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "8bdc99a9-8753-428d-be16-2526ff7a4215",
+      "name": "Merge Results - MOROCCANOIL",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        352,
+        1568
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Moroccanoil Customs and CZ Rows').first().json;\n\nif (!data || !data.shipmentKey) {\n  return [{\n    json: {\n      chatId: $('Parse Python Output - MOROCCANOIL').first().json.chatId ?? null,\n      text: 'Ошибка: не удалось получить данные обработки'\n    }\n  }];\n}\n\nconst shipmentKey = data.shipmentKey;\nconst invoiceDocsCount = data.invoiceDocsCount || 0;\nconst packingDocsCount = data.packingDocsCount || 0;\nconst batchDocsCount = data.batchDocsCount || 0;\nconst customsRowsCount = (data.customsRows || []).length;\nconst czRowsCount = (data.czRows || []).length;\nconst warnings = data.warnings || [];\n\nlet message =\n  `✅ Обработка завершена\\n\\n` +\n  `🏢 Компания: moroccanoil\\n` +\n  `📦 Поставка: ${shipmentKey}\\n` +\n  `📄 Invoice документов: ${invoiceDocsCount}\\n` +\n  `📦 Packing документов: ${packingDocsCount}\\n` +\n  `🏷️ Batch документов: ${batchDocsCount}\\n\\n` +\n  `📊 Результаты:\\n` +\n  `• Таможня: ${customsRowsCount} строк\\n` +\n  `• Честный Знак: ${czRowsCount} строк\\n\\n` +\n  `Вкладки:\\n` +\n  `• ${shipmentKey}\\n` +\n  `• ЧЗ ${shipmentKey}`;\n\nif (warnings.length > 0) {\n  message += `\\n\\n⚠️ Предупреждения:\\n`;\n  for (const w of warnings) {\n    message += `• ${w}\\n`;\n  }\n}\n\nreturn [{\n  json: {\n    chatId: data.chatId,\n    text: message.trim(),\n  }\n}];"
+      },
+      "id": "caf057f0-3bc5-428f-b3ae-3707d448cc23",
+      "name": "Prepare Summary Message - MOROCCANOIL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        576,
+        1568
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "bdab4b9a-8beb-408d-a834-a2288ac83c97",
+      "name": "Send Summary - MOROCCANOIL",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        800,
+        1568
+      ],
+      "webhookId": "2bd9fa0d-c4de-4145-a23d-944d3f0a005d",
+      "credentials": {
+        "telegramApi": {
+          "id": "T5Z5WJlAAdfu8qQO",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tg-upload-finished",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -3344,
+        1008
+      ],
+      "id": "6163aff1-2d93-4b9c-8c70-0b621af1b639",
+      "name": "Webhook - Upload Done",
+      "webhookId": "ef1a32de-0b79-4c67-b14f-04d635b2be37"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\nconst company = String(body.company || '').trim().toLowerCase();\nconst shipmentKey = String(\n  body.shipment_number || body.shipmentKey || ''\n).trim();\n\nconst allowedCompanies = new Set(['moil', 'moroccanoil', 'bandi']);\nif (!allowedCompanies.has(company)) {\n  throw new Error('Неизвестная компания');\n}\nif (!/^[A-Za-z0-9_-]{1,64}$/.test(shipmentKey)) {\n  throw new Error('Некорректный номер поставки');\n}\n\nconst shipmentDir = `/opt/tg_uploads/${company}/${shipmentKey}`;\n\nreturn [{\n  json: {\n    company,\n    shipmentKey,\n    shipmentDir,\n    manifestPath: `${shipmentDir}/manifest.json`,\n    chatId: body.user_id ?? body.chatId ?? null,\n    username: body.username || null,\n    files: Array.isArray(body.files) ? body.files : [],\n    totalFiles: Number(\n      body.total_files ||\n      body.totalFiles ||\n      (Array.isArray(body.files) ? body.files.length : 0)\n    ),\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3136,
+        1008
+      ],
+      "id": "bef034c8-63b8-44b7-b7a8-0ddbe9597bf6",
+      "name": "Normalize Bot Payload"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "cd55628c-6edd-459d-81c5-4def96b83d26",
+                    "leftValue": "={{ $json.company }}",
+                    "rightValue": "moil",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "moil"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "eac91784-5e90-44c2-b9db-dc43b3429403",
+                    "leftValue": "={{ $json.company }}",
+                    "rightValue": "bandi",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "bandi"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "c645dce6-baa1-4d16-973c-85d1d06f6747",
+                    "leftValue": "={{ $json.company }}",
+                    "rightValue": "moroccanoil",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "moroccanoil"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Unknown"
+        }
+      },
+      "id": "5095a439-934c-468c-8570-b4ed870a7ee4",
+      "name": "Route Company",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -2944,
+        976
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    company: 'moil',\n    shipmentKey: $json.shipmentKey,\n    shipmentDir: $json.shipmentDir,\n    manifestPath: $json.manifestPath,\n    chatId: $json.chatId,\n    username: $json.username,\n    files: $json.files || [],\n    totalFiles: $json.totalFiles || 0,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2688,
+        480
+      ],
+      "id": "43ca992b-67c1-4452-802d-7f9bab255938",
+      "name": "Start MOIL Processing"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    company: 'bandi',\n    shipmentKey: $json.shipmentKey,\n    shipmentDir: $json.shipmentDir,\n    manifestPath: $json.manifestPath,\n    chatId: $json.chatId,\n    username: $json.username,\n    files: $json.files || [],\n    totalFiles: $json.totalFiles || 0,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2528,
+        992
+      ],
+      "id": "a234eebc-000f-4989-b036-795b1810e4b2",
+      "name": "Start BANDI Processing"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    company: 'moroccanoil',\n    shipmentKey: $json.shipmentKey,\n    shipmentDir: $json.shipmentDir,\n    manifestPath: $json.manifestPath,\n    chatId: $json.chatId,\n    username: $json.username,\n    files: $json.files || [],\n    totalFiles: $json.totalFiles || 0,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2624,
+        1584
+      ],
+      "id": "b41c5843-5091-4caf-8557-4f4c683319a1",
+      "name": "Start MOROCCANOIL Processing"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU",
+          "mode": "list",
+          "cachedResultName": "bandi",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ \"DG \" + $json.shipmentKey }}",
+          "mode": "name"
+        }
+      },
+      "id": "328ea100-8325-4cb2-a570-6d9f694a16f6",
+      "name": "Clear DG Sheet - BANDI",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -96,
+        880
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Bandi Customs and CZ Rows').first().json;\nreturn (data.dgRows || []).map(row => ({ json: { ...row } }));"
+      },
+      "id": "7f53681a-5ad5-4267-87c3-26a28f8b067c",
+      "name": "Prepare DG Rows - BANDI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU",
+          "mode": "list",
+          "cachedResultName": "bandi",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ \"DG \" + $('Build Bandi Customs and CZ Rows').first().json.shipmentKey }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "id": "d0710f9c-4ba8-4fa4-b93f-259c90993990",
+      "name": "Write DG Rows - BANDI",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        352,
+        880
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "3ec16475-43fd-4381-a1fd-6839a082d67f",
+      "name": "Merge DG + NDG - BANDI",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        576,
+        976
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU",
+          "mode": "list",
+          "cachedResultName": "bandi",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ \"NDG \" + $json.shipmentKey }}",
+          "mode": "name"
+        }
+      },
+      "id": "73db1b08-dfc2-4725-9c5f-e7522c46121f",
+      "name": "Clear NDG Sheet - BANDI",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -96,
+        1056
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Build Bandi Customs and CZ Rows').first().json;\nreturn (data.ndgRows || []).map(row => ({ json: { ...row } }));"
+      },
+      "id": "d07b862f-88e7-4bb4-ae9f-fc6b5a698c84",
+      "name": "Prepare NDG Rows - BANDI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128,
+        1056
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU",
+          "mode": "list",
+          "cachedResultName": "bandi",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nk0J3xog_TzVraMyAwpE494Q-2XQ1yw6-amtsrsoNaU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ \"NDG \" + $('Build Bandi Customs and CZ Rows').first().json.shipmentKey }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED"
+        }
+      },
+      "id": "ea4a4679-3d73-41b7-89b3-295ee344ad03",
+      "name": "Write NDG Rows - BANDI",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        352,
+        1056
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "8z4Ag4Y5f9gz66R1",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "463d139c-ae93-444d-aff1-ed5668f7b45d",
+      "name": "Merge All BANDI Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        848,
+        1136
+      ]
+    }
+  ],
+  "connections": {
+    "Call Python Parser": {
+      "main": [
+        [
+          {
+            "node": "Parse Python Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Python Output": {
+      "main": [
+        [
+          {
+            "node": "Read Master Catalog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Master Catalog": {
+      "main": [
+        [
+          {
+            "node": "Build Customs and CZ Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Customs and CZ Rows": {
+      "main": [
+        [
+          {
+            "node": "Prepare Sheet Setup Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Customs Sheet": {
+      "main": [
+        [
+          {
+            "node": "Prepare Customs Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Customs Rows": {
+      "main": [
+        [
+          {
+            "node": "Write Customs Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Customs Rows": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Results": {
+      "main": [
+        [
+          {
+            "node": "Prepare Summary Message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear CZ Sheet": {
+      "main": [
+        [
+          {
+            "node": "Prepare CZ Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare CZ Rows": {
+      "main": [
+        [
+          {
+            "node": "Write CZ Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write CZ Rows": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Prepare Summary Message1": {
+      "main": [
+        [
+          {
+            "node": "Send Summary1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Sheet Setup Data": {
+      "main": [
+        [
+          {
+            "node": "Get Spreadsheet Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Spreadsheet Metadata": {
+      "main": [
+        [
+          {
+            "node": "Build Create Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Create Requests": {
+      "main": [
+        [
+          {
+            "node": "If Need Create Sheets?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Need Create Sheets?": {
+      "main": [
+        [
+          {
+            "node": "Create Missing Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Continue After Sheet Ensure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Missing Sheets": {
+      "main": [
+        [
+          {
+            "node": "Continue After Sheet Ensure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue After Sheet Ensure": {
+      "main": [
+        [
+          {
+            "node": "Clear Customs Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Clear CZ Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Python Parser - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Parse Python Output - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Spreadsheet Metadata - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Build Create Requests - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Missing Sheets - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Continue After Sheet Ensure - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Create Requests - BANDI": {
+      "main": [
+        [
+          {
+            "node": "If Need Create Sheets? - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue After Sheet Ensure - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Clear DG Sheet - BANDI",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Clear NDG Sheet - BANDI",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Clear CZ Sheet - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear CZ Sheet - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Prepare CZ Rows - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare CZ Rows - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Write CZ Rows - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Summary Message - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Send Summary - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Bandi Customs and CZ Rows": {
+      "main": [
+        [
+          {
+            "node": "Prepare Sheet Setup Data - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Python Output - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Read Master Catalog - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Master Catalog - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Build Bandi Customs and CZ Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Sheet Setup Data - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Get Spreadsheet Metadata - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Need Create Sheets? - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Create Missing Sheets - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Continue After Sheet Ensure - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write CZ Rows - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Merge All BANDI Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Call Python Parser - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Parse Python Output - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Python Output - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Read Master Catalog - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Master Catalog - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Build Moroccanoil Customs and CZ Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Moroccanoil Customs and CZ Rows": {
+      "main": [
+        [
+          {
+            "node": "Prepare Sheet Setup Data - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Sheet Setup Data - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Get Spreadsheet Metadata - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Spreadsheet Metadata - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Build Create Requests - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Create Requests - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "If Need Create Sheets? - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Need Create Sheets? - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Create Missing Sheets - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Continue After Sheet Ensure - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Missing Sheets - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Continue After Sheet Ensure - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue After Sheet Ensure - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Clear Customs Sheet - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Clear CZ Sheet - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Customs Sheet - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Prepare Customs Rows - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Customs Rows - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Write Customs Rows - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Customs Rows - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Merge Results - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear CZ Sheet - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Prepare CZ Rows - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare CZ Rows - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Write CZ Rows - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write CZ Rows - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Merge Results - MOROCCANOIL",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Results - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Prepare Summary Message - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Summary Message - MOROCCANOIL": {
+      "main": [
+        [
+          {
+            "node": "Send Summary - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook - Upload Done": {
+      "main": [
+        [
+          {
+            "node": "Normalize Bot Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Company": {
+      "main": [
+        [
+          {
+            "node": "Start MOIL Processing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Start BANDI Processing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Start MOROCCANOIL Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Bot Payload": {
+      "main": [
+        [
+          {
+            "node": "Route Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start MOIL Processing": {
+      "main": [
+        [
+          {
+            "node": "Call Python Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start BANDI Processing": {
+      "main": [
+        [
+          {
+            "node": "Call Python Parser - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start MOROCCANOIL Processing": {
+      "main": [
+        [
+          {
+            "node": "Call Python Parser - MOROCCANOIL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear DG Sheet - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Prepare DG Rows - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare DG Rows - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Write DG Rows - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write DG Rows - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Merge DG + NDG - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge DG + NDG - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Merge All BANDI Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear NDG Sheet - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Prepare NDG Rows - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare NDG Rows - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Write NDG Rows - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write NDG Rows - BANDI": {
+      "main": [
+        [
+          {
+            "node": "Merge DG + NDG - BANDI",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge All BANDI Results": {
+      "main": [
+        [
+          {
+            "node": "Prepare Summary Message - BANDI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "staticData": null,
+  "active": true,
+  "id": "oAsH9xGYN9uxtLPF",
+  "versionId": "2a81e6a4-42b6-4c72-abb6-293cddaef8d6",
+  "meta": {
+    "instanceId": "b6b698ba3d8da5ea5d1b139e5c0962ae8c7b60647b6491dbf1f2c56d42d61b80"
+  },
+  "pinData": {},
+  "tags": []
+}
