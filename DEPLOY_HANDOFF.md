@@ -100,14 +100,63 @@ layout parser, обработку общего packing, нового batch XLSX,
 - Security smoke: некорректный shipment key остановлен в
   `Normalize Bot Payload` до SSH-ноды (execution `21`, ожидаемый `error`).
 - Fixture validation:
-  - 23 июля — invoice/packing `32266`, 7 invoice + 1 общий packing;
+  - 23 июля — семь пар «один invoice + один и тот же общий packing»;
   - 24 июля — invoice/packing/batch `5904`, batch boxes `422`;
-  - полный набор тестов с Node.js 20.20.2 — `15 passed`.
-- Production end-to-end smoke: execution `22`, статус `success`.
-  Полный комплект сохранён в `/opt/tg_uploads/moil/LOAD0006732`; созданы
-  листы `LOAD0006732` и `ЧЗ LOAD0006732`.
-  - customs: 94 строки, из них 89 товарных + 5 компонентов;
-  - ЧЗ: 106 строк, из них 101 товарная + 5 компонентов;
-  - товарное quantity в обоих листах: `32266`;
-  - коробки в обоих листах: `854`;
-  - денежные поля пяти component-строк пустые.
+  - регрессии запускаются с Node.js 20.20.2.
+- Production smoke `LOAD0006732` (execution `22`) был технически успешным,
+  но функционально невалидным: он ошибочно объединил семь invoice в два
+  итоговых листа. Листы переименованы в
+  `_ARCHIVE_WRONG_LOAD0006732_20260724` и
+  `_ARCHIVE_WRONG_ЧЗ_LOAD0006732_20260724`, затем скрыты.
+- Актуальный контракт: один запуск MOIL = ровно один invoice + ровно один
+  packing. Для следующего invoice тот же общий packing загружается повторно.
+- Проверки количества документов развёрнуты в боте и Code-ноде; parser
+  добавляет диагностику. Отдельные листы каждого invoice проверены ниже.
+
+### Коррекция модели обработки
+
+- Telegram-бот принимает для MOIL только `1 invoice + 1 packing`.
+- Code-нода повторяет эту проверку и не позволяет прямому webhook обойти её.
+- Общий packing прикладывается повторно к каждому invoice.
+- Для повторяющегося SKU build выбирает точный набор packing-строк по
+  quantity. Exact-subset поиск ограничен 20 строками и 5000 состояниями;
+  неоднозначный результат остаётся warning и обрабатывается
+  пропорциональным fallback.
+- `_master_catalog` синхронизирован только по однозначным данным клиентского
+  Excel или точному barcode. Backup:
+  `_BACKUP_master_catalog_20260724_before_sku_sync` (hidden).
+- Без источника остались:
+  `BAGM26TRAVEL`, `BAGMP22STYLIST`, `M202BDM100`, `M205BDM100`,
+  `MP26TRAVELC`. Эти поля должны оставаться подсвеченными до ответа клиента.
+
+### Финальная проверка production
+
+- Backup перед установкой parser/bot:
+  - `/data/moil/parse_moil_bundle.py.bak.20260724T160505Z`;
+  - `/opt/tg-upload-bot/bot.py.bak.20260724T160505Z`;
+  - `/opt/n8n/.n8n/database.sqlite.bak.20260724T160505Z`.
+- Дополнительные backup SQLite перед обновлениями Code-ноды:
+  - `/opt/n8n/.n8n/database.sqlite.bak.20260724T161840Z`;
+  - `/opt/n8n/.n8n/database.sqlite.bak.20260724T162157Z`.
+- `PRAGMA integrity_check`: `ok`; `n8n` и `tg-upload-bot`: `active`;
+  `/healthz`: HTTP `200`.
+- Негативный E2E `LOAD0006732`: execution `23`, ожидаемый `error` до записи
+  итоговых листов.
+- Отдельные пары листов созданы для invoice:
+  `126022808`, `126022809`, `126022810`, `126022812`, `126022814`,
+  `126022815`, `126022816`, `126023953`.
+- Временные executions `39`/`40` остановились только из-за Google Sheets
+  read quota. После паузы повторные executions `41`/`42` завершились
+  `success`; неполные листы скрыты с префиксом
+  `_ARCHIVE_QUOTA_FAILED_`.
+- Production-значения:
+  - `126022816 / M201HCM40`: article `146549`, quantity `432`,
+    total `1213.92`, boxes `3`, weight `25.92`, pallet `12`;
+  - `126022816 / M105THL100`: article `877657`, quantity `360`,
+    commercial discount `97.92`, boxes `6`, weight `54`, pallet `6`;
+  - `126022815 / M201BDM100`: quantity `6`, boxes `0`, weight `1.68`,
+    pallet `14`;
+  - `126022810 / M201BDM100`: quantity `1188`, boxes `33`,
+    weight `332.64`, pallet `16`.
+- Итоговая локальная проверка: `37 passed`, `node --check` и
+  `compileall` успешны; reviewer agent блокеров не нашёл.

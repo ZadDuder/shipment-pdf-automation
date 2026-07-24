@@ -832,8 +832,8 @@ def sum_invoice_product_quantity(rows: Sequence[Dict[str, Any]]) -> Decimal:
 
 
 def has_document_count_mismatch(invoice_count: int, packing_count: int) -> bool:
-    # A supplier may issue several invoices covered by one common packing list.
-    return packing_count != 1 and invoice_count != packing_count
+    # Each run builds one table from one invoice plus its common packing list.
+    return invoice_count != 1 or packing_count != 1
 
 
 def format_excel_date(value: Any) -> Optional[str]:

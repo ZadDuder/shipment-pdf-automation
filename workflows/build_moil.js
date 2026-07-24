@@ -10,6 +10,23 @@ if (!pythonData || !pythonData.invoiceRows) {
   }];
 }
 
+const sourceInvoiceNumbers = [
+  ...new Set(
+    (pythonData.invoiceRows || [])
+      .map((row) => String(row.__invoiceNo || '').trim())
+      .filter(Boolean)
+  )
+];
+if (
+  Number(pythonData.invoiceDocsCount || 0) !== 1 ||
+  Number(pythonData.packingDocsCount || 0) !== 1 ||
+  sourceInvoiceNumbers.length > 1
+) {
+  throw new Error(
+    'MOIL обрабатывается отдельно: загрузите один invoice и один общий packing'
+  );
+}
+
 const clean = (value) => String(value ?? '').trim();
 
 const normalizeCode = (value) =>
@@ -250,6 +267,81 @@ for (const row of bundle.packingRows || []) {
     nestedInCb: row.nestedInCb ?? null,
   });
 }
+
+const selectPackingRowsForQuantity = (rows, targetQuantity) => {
+  const target = parseNumber(targetQuantity);
+  if (!rows.length || target === null || target <= 0) return rows;
+
+  const MAX_EXACT_ROWS = 20;
+  const MAX_SUBSETS = 5_000;
+  const quantityKey = (value) => Math.round(Number(value) * 1_000_000);
+  const targetKey = quantityKey(target);
+  const allRowsHaveQuantity = rows.every(
+    (row) => row.quantity !== null && row.quantity !== undefined
+  );
+  const totalKey = rows.reduce(
+    (sum, row) =>
+      row.quantity === null || row.quantity === undefined
+        ? sum
+        : sum + quantityKey(row.quantity),
+    0
+  );
+
+  if (allRowsHaveQuantity && totalKey === targetKey) return rows;
+  if (!allRowsHaveQuantity) return rows;
+
+  // The supplier's common packing can contain separate rows of the same SKU
+  // for different invoices. Pick the exact row set for this invoice before
+  // falling back to proportional scaling.
+  const candidates = rows
+    .map((row, index) => ({
+      index,
+      quantityKey: quantityKey(row.quantity),
+    }))
+    .filter(({ quantityKey: rowKey }) => rowKey > 0 && rowKey <= targetKey);
+
+  if (candidates.length > MAX_EXACT_ROWS) return rows;
+  if (
+    candidates.length === 1 &&
+    candidates[0].quantityKey === targetKey
+  ) {
+    return [rows[candidates[0].index]];
+  }
+
+  const subsets = new Map([
+    [0, { indexes: [], ways: 1 }],
+  ]);
+  for (const candidate of candidates) {
+    const snapshot = [...subsets.entries()].map(([sumKey, state]) => [
+      sumKey,
+      {
+        indexes: state.indexes,
+        ways: state.ways,
+      },
+    ]);
+
+    for (const [sumKey, state] of snapshot) {
+      const rowKey = candidate.quantityKey;
+      const nextKey = sumKey + rowKey;
+      if (nextKey > targetKey) continue;
+
+      const existing = subsets.get(nextKey);
+      if (existing) {
+        existing.ways = Math.min(2, existing.ways + state.ways);
+        continue;
+      }
+      if (subsets.size >= MAX_SUBSETS) return rows;
+      subsets.set(nextKey, {
+        indexes: [...state.indexes, candidate.index],
+        ways: state.ways,
+      });
+    }
+  }
+
+  const selected = subsets.get(targetKey);
+  if (!selected?.indexes.length || selected.ways !== 1) return rows;
+  return selected.indexes.map((index) => rows[index]);
+};
 
 const batchMap = {};
 for (const row of bundle.batchRows || []) {
@@ -611,7 +703,10 @@ for (const entry of displaySequence) {
   const invoiceRow = entry.row;
   const itemNo = invoiceRow.itemNo;
   const batchRows = batchMap[itemNo] || [];
-  const packingRows = packingMap[itemNo] || [];
+  const packingRows = selectPackingRowsForQuantity(
+    packingMap[itemNo] || [],
+    invoiceRow.quantity
+  );
   const fallbackBatchBarcode = batchRows.find((r) => r.barcode)?.barcode || null;
   const master = resolveMaster({ itemNo, batchBarcode: fallbackBatchBarcode });
   const packingTotals = aggregatePackingTotals(packingRows);
@@ -701,7 +796,10 @@ for (const entry of displaySequence) {
 
   const invoiceRow = entry.row;
   const itemNo = invoiceRow.itemNo;
-  const packingRows = packingMap[itemNo] || [];
+  const packingRows = selectPackingRowsForQuantity(
+    packingMap[itemNo] || [],
+    invoiceRow.quantity
+  );
   const batchRows = batchMap[itemNo] || [];
   const fallbackBatchBarcode = batchRows.find((r) => r.barcode)?.barcode || null;
   const master = resolveMaster({ itemNo, batchBarcode: fallbackBatchBarcode });

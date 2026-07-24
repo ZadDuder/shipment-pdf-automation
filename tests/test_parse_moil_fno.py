@@ -178,6 +178,30 @@ def test_repeated_invoice_line_number_marks_kit_components(
     assert [row["__rowOrder"] for row in rows] == [1, 2, 3]
 
 
+def test_fno_invoice_reconstructs_hand_cream_sku_suffix(
+    moil_parser, monkeypatch, tmp_path
+):
+    invoice_path = tmp_path / "hand-cream-invoice.pdf"
+    invoice_path.touch()
+    lines = [
+        "Invoice No 126022816",
+        "# Item No. Description Unit Unit Price Total Before Discount Unit Price Total Price Produce",
+        "72 M201HCM4 Hand Cream 40ml Fragrance 432 2.81 $ 1213.92 $ 0.00% 2.81 $ 1,213.92 $ Israel",
+        "0 Originale",
+    ]
+    monkeypatch.setattr(moil_parser, "extract_pdf_lines", lambda _: lines)
+
+    _, rows = moil_parser.parse_invoice_pdf(
+        _entry(invoice_path), "126022816", []
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["itemNo"] == "M201HCM40"
+    assert rows[0]["description"] == "Hand Cream 40ml Fragrance Originale"
+    assert rows[0]["quantity"] == 432
+    assert rows[0]["commercialDiscount"] == 0
+
+
 def test_shipping_data_batch_layout_is_detected_and_forward_filled(
     moil_parser, tmp_path
 ):
@@ -315,7 +339,10 @@ def test_invoice_validation_does_not_double_count_kit_components(moil_parser):
     assert moil_parser.sum_invoice_product_quantity(rows) == 976
 
 
-def test_one_common_packing_is_valid_for_multiple_invoices(moil_parser):
-    assert moil_parser.has_document_count_mismatch(7, 1) is False
+def test_moil_requires_one_invoice_and_one_packing_per_run(moil_parser):
     assert moil_parser.has_document_count_mismatch(1, 1) is False
+    assert moil_parser.has_document_count_mismatch(7, 1) is True
+    assert moil_parser.has_document_count_mismatch(0, 1) is True
+    assert moil_parser.has_document_count_mismatch(1, 0) is True
+    assert moil_parser.has_document_count_mismatch(1, 2) is True
     assert moil_parser.has_document_count_mismatch(3, 2) is True

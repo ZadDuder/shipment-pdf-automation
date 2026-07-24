@@ -28,6 +28,8 @@ from aiogram.types import (
     Message,
 )
 
+from submission_validation import validate_submission
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -414,6 +416,9 @@ async def _do_done(message: Message, state: FSMContext, user_id: Optional[int] =
         return await message.answer("Нет активной поставки. /start.")
     if not s.files:
         return await message.answer("Не загружено ни одного файла. Загрузите хотя бы один.")
+    validation_error = validate_submission(s.company, s.counts)
+    if validation_error:
+        return await message.answer(validation_error)
     s.write_manifest()
     payload = {
         "company": s.company,
