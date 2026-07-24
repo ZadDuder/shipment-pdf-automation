@@ -98,8 +98,16 @@ layout parser, обработку общего packing, нового batch XLSX,
 - `n8n` и `tg-upload-bot`: `active`.
 - Google Sheets: `_master_catalog`, `TEMPLATE_CUSTOMS`, `TEMPLATE_CZ`.
 - Security smoke: некорректный shipment key остановлен в
-  `Normalize Bot Payload` до SSH-ноды.
+  `Normalize Bot Payload` до SSH-ноды (execution `21`, ожидаемый `error`).
 - Fixture validation:
   - 23 июля — invoice/packing `32266`, 7 invoice + 1 общий packing;
   - 24 июля — invoice/packing/batch `5904`, batch boxes `422`;
   - полный набор тестов с Node.js 20.20.2 — `15 passed`.
+- Production end-to-end smoke: execution `22`, статус `success`.
+  Полный комплект сохранён в `/opt/tg_uploads/moil/LOAD0006732`; созданы
+  листы `LOAD0006732` и `ЧЗ LOAD0006732`.
+  - customs: 94 строки, из них 89 товарных + 5 компонентов;
+  - ЧЗ: 106 строк, из них 101 товарная + 5 компонентов;
+  - товарное quantity в обоих листах: `32266`;
+  - коробки в обоих листах: `854`;
+  - денежные поля пяти component-строк пустые.
