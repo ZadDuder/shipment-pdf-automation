@@ -129,6 +129,162 @@ def test_kit_components_are_visible_without_double_counting_money():
     assert component["Commercial Discount, $"] is None
 
 
+def test_kit_component_batches_attach_by_component_description():
+    bundle = base_bundle(
+        [
+            {
+                "itemIndex": 1,
+                "itemNo": "MP26TRAVELC",
+                "description": "Travel Kit 2026 - Hydration",
+                "quantity": 96,
+                "__invoiceNo": "INV-KIT",
+                "__rowOrder": 1,
+                "__isComponent": False,
+            },
+            {
+                "itemIndex": 1,
+                "itemNo": "M107COHY70",
+                "description": "Hydrating Conditioner 70ml",
+                "quantity": 96,
+                "__invoiceNo": "INV-KIT",
+                "__rowOrder": 2,
+                "__isComponent": True,
+            },
+        ]
+    )
+    bundle["batchDocsCount"] = 1
+    bundle["batchFiles"] = ["LOAD0006732.xlsx"]
+    bundle["packingRows"] = [
+        {
+            "itemNo": "MP26TRAVELC",
+            "quantity": 96,
+            "boxes": 12,
+            "weight": 60,
+            "pallet": "14",
+            "sscc": "100005654",
+        }
+    ]
+    bundle["batchRows"] = [
+        {
+            "itemNo": "MP26TRAVELC",
+            "kitComponentDescription": "Hydrating Conditioner 70ml",
+            "quantity": 96,
+            "quantityUnit": "pieces",
+            "boxes": None,
+            "pallet": "100005654",
+            "batchNo": "0201FA",
+        }
+    ]
+
+    result = run_build_node(
+        bundle,
+        [
+            master_row("MP26TRAVELC", "KIT", "7290121931526"),
+            master_row("M107COHY70", "COMP", "7290011000001"),
+        ],
+    )
+
+    parent_rows = [
+        row for row in result["czRows"]
+        if row["Item No."] == "MP26TRAVELC"
+    ]
+    component_rows = [
+        row for row in result["czRows"]
+        if row["Item No."] == "M107COHY70"
+    ]
+    assert len(parent_rows) == 1
+    assert parent_rows[0]["Quantity Количество"] == 96
+    assert parent_rows[0]["Количество коробок, шт."] == 12
+    assert parent_rows[0]["Batch No"] is None
+    assert "нет строки в batch" not in (
+        parent_rows[0]["__warning_reason"] or ""
+    )
+    assert len(component_rows) == 1
+    assert component_rows[0]["Quantity Количество"] == 96
+    assert component_rows[0]["Batch No"] == "0201FA"
+
+
+def test_same_component_description_is_scoped_to_parent_kit():
+    bundle = base_bundle(
+        [
+            {
+                "itemIndex": 1,
+                "itemNo": "KIT-A",
+                "description": "Kit A",
+                "quantity": 10,
+                "__invoiceNo": "INV-KIT",
+                "__rowOrder": 1,
+                "__isComponent": False,
+            },
+            {
+                "itemIndex": 1,
+                "itemNo": "COMP-A",
+                "description": "Shared Component 10ml",
+                "quantity": 10,
+                "__invoiceNo": "INV-KIT",
+                "__rowOrder": 2,
+                "__isComponent": True,
+            },
+            {
+                "itemIndex": 2,
+                "itemNo": "KIT-B",
+                "description": "Kit B",
+                "quantity": 20,
+                "__invoiceNo": "INV-KIT",
+                "__rowOrder": 3,
+                "__isComponent": False,
+            },
+            {
+                "itemIndex": 2,
+                "itemNo": "COMP-B",
+                "description": "Shared Component 10ml",
+                "quantity": 20,
+                "__invoiceNo": "INV-KIT",
+                "__rowOrder": 4,
+                "__isComponent": True,
+            },
+        ]
+    )
+    bundle["batchDocsCount"] = 1
+    bundle["batchFiles"] = ["kit.xlsx"]
+    bundle["batchRows"] = [
+        {
+            "itemNo": "KIT-A",
+            "kitComponentDescription": "Shared Component 10ml",
+            "quantity": 10,
+            "quantityUnit": "pieces",
+            "batchNo": "BATCH-A",
+        },
+        {
+            "itemNo": "KIT-B",
+            "kitComponentDescription": "Shared Component 10ml",
+            "quantity": 20,
+            "quantityUnit": "pieces",
+            "batchNo": "BATCH-B",
+        },
+    ]
+
+    result = run_build_node(
+        bundle,
+        [
+            master_row("KIT-A", "KIT-A", "7290000000001"),
+            master_row("KIT-B", "KIT-B", "7290000000002"),
+            master_row("COMP-A", "COMP-A", "7290000000003"),
+            master_row("COMP-B", "COMP-B", "7290000000004"),
+        ],
+    )
+
+    batches_by_component = {
+        row["Item No."]: row["Batch No"]
+        for row in result["czRows"]
+        if row["Item No."] in {"COMP-A", "COMP-B"}
+    }
+    assert batches_by_component == {
+        "COMP-A": "BATCH-A",
+        "COMP-B": "BATCH-B",
+    }
+
+
 def test_foc_total_after_discount_stays_zero():
     bundle = base_bundle(
         [
@@ -265,16 +421,120 @@ def test_explicit_zero_boxes_are_not_turned_into_one():
     assert result["czRows"][0]["__warning_boxes_zero"] is True
 
 
+def test_multiple_invoice_documents_create_separate_customs_and_one_cz_sheet():
+    bundle = base_bundle(
+        [
+            {
+                "itemIndex": 1,
+                "itemNo": "SKU-A",
+                "quantity": 10,
+                "__invoiceNo": "INV-A",
+                "__isComponent": False,
+            },
+            {
+                "itemIndex": 1,
+                "itemNo": "SKU-B",
+                "quantity": 20,
+                "__invoiceNo": "INV-B",
+                "__isComponent": False,
+            },
+        ]
+    )
+    bundle["invoiceDocsCount"] = 2
+
+    result = run_build_node(
+        bundle,
+        [
+            master_row("SKU-A", "A", "7290000000001"),
+            master_row("SKU-B", "B", "7290000000002"),
+        ],
+    )
+
+    assert [sheet["sheetName"] for sheet in result["customsSheets"]] == [
+        "INV-A",
+        "INV-B",
+    ]
+    assert [row["Item No."] for row in result["customsSheets"][0]["rows"]] == [
+        "SKU-A"
+    ]
+    assert [row["Item No."] for row in result["customsSheets"][1]["rows"]] == [
+        "SKU-B"
+    ]
+    assert result["czSheetName"] == "ЧЗ TEST"
+    assert [row["Item No."] for row in result["czRows"]] == ["SKU-A", "SKU-B"]
+
+
+def test_equal_quantity_invoices_consume_distinct_packing_rows():
+    bundle = base_bundle(
+        [
+            {
+                "itemIndex": 1,
+                "itemNo": "SKU1",
+                "quantity": 10,
+                "__invoiceNo": "INV-A",
+                "__isComponent": False,
+            },
+            {
+                "itemIndex": 1,
+                "itemNo": "SKU1",
+                "quantity": 10,
+                "__invoiceNo": "INV-B",
+                "__isComponent": False,
+            },
+        ]
+    )
+    bundle["invoiceDocsCount"] = 2
+    bundle["packingRows"] = [
+        {
+            "itemNo": "SKU1",
+            "quantity": 10,
+            "boxes": 1,
+            "weight": 10,
+            "pallet": "1",
+            "sscc": "1001",
+        },
+        {
+            "itemNo": "SKU1",
+            "quantity": 10,
+            "boxes": 2,
+            "weight": 20,
+            "pallet": "2",
+            "sscc": "1002",
+        },
+    ]
+
+    result = run_build_node(
+        bundle,
+        [master_row("SKU1", "1001", "7290000000001")],
+    )
+
+    assert [
+        (
+            sheet["invoiceNo"],
+            sheet["rows"][0]["Количество коробок, шт."],
+            sheet["rows"][0]["Вес, кг"],
+            sheet["rows"][0]["№ паллета"],
+        )
+        for sheet in result["customsSheets"]
+    ] == [
+        ("INV-A", 1, 10, "1"),
+        ("INV-B", 2, 20, "2"),
+    ]
+    assert [
+        (row["Количество коробок, шт."], row["Вес, кг"], row["№ паллета"])
+        for row in result["czRows"]
+    ] == [(1, 10, "1"), (2, 20, "2")]
+
+
 @pytest.mark.parametrize(
     ("invoice_docs_count", "invoice_numbers"),
     [
-        (2, ["INV-A", "INV-B"]),
         (1, ["INV-A", "INV-B"]),
         (2, ["INV-A", "INV-A"]),
         (2, ["", ""]),
     ],
 )
-def test_multiple_invoice_documents_are_rejected(
+def test_invoice_document_and_parsed_number_mismatch_is_rejected(
     invoice_docs_count, invoice_numbers
 ):
     bundle = base_bundle(
@@ -300,7 +560,7 @@ def test_multiple_invoice_documents_are_rejected(
     with pytest.raises(subprocess.CalledProcessError) as error:
         run_build_node(bundle, [])
 
-    assert "один invoice" in error.value.stderr
+    assert "invoice" in error.value.stderr
 
 
 @pytest.mark.parametrize("packing_docs_count", [0, 2])
@@ -322,7 +582,123 @@ def test_non_single_packing_document_is_rejected(packing_docs_count):
     with pytest.raises(subprocess.CalledProcessError) as error:
         run_build_node(bundle, [])
 
-    assert "один invoice и один общий packing" in error.value.stderr
+    assert "один общий packing" in error.value.stderr
+
+
+def test_m101lt100_is_allocated_between_regular_and_foc_invoices():
+    bundle = base_bundle(
+        [
+            {
+                "itemIndex": 1,
+                "itemNo": "M101LT100",
+                "description": "Moroccanoil Treatment Light 100ml",
+                "quantity": 5,
+                "unitPriceBeforeDiscount": 8.86,
+                "totalBeforeDiscount": 44.3,
+                "discountPercentage": 100,
+                "unitPriceAfterDiscount": 0,
+                "totalPriceAfterDiscount": 0,
+                "commercialDiscount": 44.3,
+                "__invoiceNo": "126022814",
+                "__rowOrder": 1,
+                "__isComponent": False,
+                "__isFoc": True,
+            },
+            {
+                "itemIndex": 5,
+                "itemNo": "M101LT100",
+                "description": "Moroccanoil Treatment Light 100ml",
+                "quantity": 240,
+                "unitPriceBeforeDiscount": 8.86,
+                "totalBeforeDiscount": 2126.4,
+                "discountPercentage": 0,
+                "unitPriceAfterDiscount": 8.86,
+                "totalPriceAfterDiscount": 2126.4,
+                "commercialDiscount": 0,
+                "__invoiceNo": "126022816",
+                "__rowOrder": 5,
+                "__isComponent": False,
+            },
+        ]
+    )
+    bundle["invoiceDocsCount"] = 2
+    bundle["batchDocsCount"] = 1
+    bundle["batchFiles"] = ["LOAD0006732.xlsx"]
+    bundle["packingRows"] = [
+        {
+            "itemNo": "M101LT100",
+            "quantity": 240,
+            "boxes": 5,
+            "weight": 69.1,
+            "pallet": "9",
+            "sscc": "100004392",
+        },
+        {
+            "itemNo": "M101LT100",
+            "quantity": 5,
+            "boxes": 0,
+            "weight": 1.35,
+            "pallet": "13",
+            "sscc": "100005635",
+            "nestedInCb": "100005636",
+        },
+    ]
+    bundle["batchRows"] = [
+        {
+            "itemNo": "M101LT100",
+            "quantity": 240,
+            "quantityUnit": "pieces",
+            "boxes": 5,
+            "pallet": "100004392",
+            "batchNo": "14734LDZ",
+        },
+        {
+            "itemNo": "M101LT100",
+            "quantity": 5,
+            "quantityUnit": "pieces",
+            "boxes": 0,
+            "pallet": "100005636",
+            "batchNo": "14477BZ",
+        },
+    ]
+
+    result = run_build_node(
+        bundle,
+        [master_row("M101LT100", "100005636", "7290011587757")],
+    )
+
+    by_invoice = {
+        sheet["invoiceNo"]: sheet["rows"][0]
+        for sheet in result["customsSheets"]
+    }
+    assert by_invoice["126022814"]["Quantity Количество"] == 5
+    assert by_invoice["126022814"]["Количество коробок, шт."] == 0
+    assert by_invoice["126022814"]["Вес, кг"] == 1.35
+    assert by_invoice["126022814"]["№ паллета"] == "13"
+    assert by_invoice["126022814"]["Total,$"] == 0
+    assert by_invoice["126022816"]["Quantity Количество"] == 240
+    assert by_invoice["126022816"]["Количество коробок, шт."] == 5
+    assert by_invoice["126022816"]["Вес, кг"] == 69.1
+    assert by_invoice["126022816"]["№ паллета"] == "9"
+
+    m101_rows = [
+        row for row in result["czRows"]
+        if row["Item No."] == "M101LT100"
+    ]
+    assert len(m101_rows) == 2
+    assert [
+        (
+            row["Quantity Количество"],
+            row["Количество коробок, шт."],
+            row["Вес, кг"],
+            row["№ паллета"],
+            row["Batch No"],
+        )
+        for row in m101_rows
+    ] == [
+        (5, 0, 1.35, "13", "14477BZ"),
+        (240, 5, 69.1, "9", "14734LDZ"),
+    ]
 
 
 def test_single_invoice_keeps_customer_examples_separate_and_complete():

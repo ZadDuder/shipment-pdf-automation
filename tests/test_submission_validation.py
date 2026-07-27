@@ -21,23 +21,23 @@ def validation_module():
     return module
 
 
-@pytest.mark.parametrize("invoice_count", [0, 2, 7])
-def test_moil_requires_exactly_one_invoice(validation_module, invoice_count):
+def test_moil_requires_at_least_one_invoice(validation_module):
     error = validation_module.validate_submission(
         "moil",
-        {"inv": invoice_count, "pac": 1, "batch": 0},
+        {"inv": 0, "pac": 1, "batch": 0},
     )
 
     assert error is not None
-    assert "один invoice" in error
+    assert "invoice" in error
     assert "общий packing" in error
 
 
-def test_moil_accepts_one_invoice(validation_module):
+@pytest.mark.parametrize("invoice_count", [1, 2, 7])
+def test_moil_accepts_full_invoice_package(validation_module, invoice_count):
     assert (
         validation_module.validate_submission(
             "moil",
-            {"inv": 1, "pac": 1, "batch": 0},
+            {"inv": invoice_count, "pac": 1, "batch": 0},
         )
         is None
     )
@@ -51,8 +51,18 @@ def test_moil_requires_exactly_one_packing(validation_module, packing_count):
     )
 
     assert error is not None
-    assert "один invoice" in error
+    assert "invoice" in error
     assert "один общий packing" in error
+
+
+def test_moil_rejects_more_than_one_batch_file(validation_module):
+    error = validation_module.validate_submission(
+        "moil",
+        {"inv": 7, "pac": 1, "batch": 2},
+    )
+
+    assert error is not None
+    assert "batch" in error
 
 
 @pytest.mark.parametrize("company", ["bandi", "moroccanoil"])

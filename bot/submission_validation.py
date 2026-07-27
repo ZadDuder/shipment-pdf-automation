@@ -14,13 +14,17 @@ def validate_submission(
 
     invoice_count = int(counts.get("inv", 0) or 0)
     packing_count = int(counts.get("pac", 0) or 0)
-    if invoice_count != 1 or packing_count != 1:
+    batch_count = int(counts.get("batch", 0) or 0)
+    if invoice_count < 1 or packing_count != 1:
         return (
-            "Для MOIL за один запуск нужно загрузить ровно один invoice "
-            "и один общий packing.\n"
+            "Для MOIL нужно загрузить полный комплект: один или несколько "
+            "invoice и ровно один общий packing.\n"
             f"Сейчас загружено: invoice — {invoice_count}, "
-            f"packing — {packing_count}. "
-            "Для следующего invoice начните отдельную поставку и снова "
-            "приложите к нему этот packing."
+            f"packing — {packing_count}."
+        )
+    if batch_count > 1:
+        return (
+            "Для MOIL нужно загрузить не более одного общего batch-файла.\n"
+            f"Сейчас загружено batch-файлов: {batch_count}."
         )
     return None

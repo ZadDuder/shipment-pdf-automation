@@ -29,3 +29,26 @@ def test_workflow_uses_current_moil_spreadsheet_only():
 
     assert PRODUCTION_MOIL_SPREADSHEET in serialized
     assert OBSOLETE_MOIL_SPREADSHEET not in serialized
+
+
+def test_moil_workflow_writes_per_invoice_customs_and_one_combined_cz():
+    workflow = _workflow()
+    nodes = {node["name"]: node for node in workflow["nodes"]}
+
+    setup_code = nodes["Prepare Sheet Setup Data"]["parameters"]["jsCode"]
+    create_code = nodes["Build Create Requests"]["parameters"]["jsCode"]
+    summary_code = nodes["Prepare Summary Message1"]["parameters"]["jsCode"]
+
+    assert "customsSheetNames" in setup_code
+    assert "for (const sheetName of setup.customsSheetNames)" in create_code
+    assert "общей вкладке" in summary_code
+
+    for node_name in ("Clear Customs Sheet", "Clear CZ Sheet"):
+        node = nodes[node_name]
+        assert node["type"] == "n8n-nodes-base.httpRequest"
+        assert node["parameters"]["url"].endswith("/values:batchClear")
+
+    for node_name in ("Write Customs Rows", "Write CZ Rows"):
+        node = nodes[node_name]
+        assert node["type"] == "n8n-nodes-base.httpRequest"
+        assert node["parameters"]["url"].endswith("/values:batchUpdate")

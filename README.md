@@ -13,7 +13,9 @@ Sheets.
 
 - `bot/` — Telegram-бот и systemd unit.
 - `пайтон скрипт/` — bundle-парсеры документов.
-- `workflows/build_moil.js` — исходник Code-ноды MOIL для n8n.
+- `workflows/*.js` — поддерживаемые исходники MOIL Code-нод для n8n.
+- `scripts/sync_moil_workflow_export.py` — синхронизация этих исходников и
+  Google Sheets batch API-нод с `final.json`.
 - `final.json` — экспорт workflow n8n; перед импортом сверять с production.
 - `tests/` — регрессии парсера и Code-ноды.
 - `CLAUDE.md` — подробные бизнес-правила и архитектура.
@@ -43,6 +45,10 @@ python -m venv .venv
   --input-dir /path/to/shipment \
   --pretty
 ```
+
+Контракт MOIL: в одну поставку загружаются все invoice, ровно один общий
+packing и не более одного общего batch-файла. Результат — отдельный customs
+лист на каждый invoice и один общий лист ЧЗ на поставку.
 
 ## Production
 

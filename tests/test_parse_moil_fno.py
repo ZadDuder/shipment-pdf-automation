@@ -293,6 +293,55 @@ def test_shipping_data_batch_layout_is_detected_and_forward_filled(
     assert all(row["barcode"] == "7290016033601" for row in rows)
 
 
+def test_shipping_data_kit_components_are_piece_rows(moil_parser, tmp_path):
+    batch_path = tmp_path / "shipping-kit.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    for _ in range(10):
+        worksheet.append([])
+    worksheet.append(
+        [
+            "Pallet", None, "SKU", "Prod Name", "EAN", None,
+            "Kit Batch No", "Kit component", None, "Batch No",
+            "Prod. date", "Exp. date", None, None, None, "Qty",
+        ]
+    )
+    worksheet.append(
+        [
+            "100005654", None, "MP26TRAVELC", "Travel Kit",
+            "7290121931526", None, "100006108-A",
+            "Hydrating Conditioner 70ml", None, "0201FA",
+            "2026-06-01", "2029-01-30", None, None, None, 96,
+        ]
+    )
+    worksheet.append(
+        [
+            None, None, None, None, None, None, "100006108-A",
+            "Hydrating Shampoo 70ml", None, "0219EA",
+            "2026-05-19", "2029-01-17", None, None, None, 96,
+        ]
+    )
+    workbook.save(batch_path)
+
+    warnings: list[str] = []
+    rows = moil_parser.parse_batch_xlsx(
+        _entry(batch_path), "LOAD0006732", warnings
+    )
+
+    assert warnings == []
+    assert [row["itemNo"] for row in rows] == [
+        "MP26TRAVELC",
+        "MP26TRAVELC",
+    ]
+    assert [row["kitComponentDescription"] for row in rows] == [
+        "Hydrating Conditioner 70ml",
+        "Hydrating Shampoo 70ml",
+    ]
+    assert all(row["quantity"] == 96 for row in rows)
+    assert all(row["quantityUnit"] == "pieces" for row in rows)
+    assert all(row["boxes"] is None for row in rows)
+
+
 def test_batch_box_quantities_are_converted_to_pieces(moil_parser):
     packing_rows = [
         {
@@ -339,10 +388,123 @@ def test_invoice_validation_does_not_double_count_kit_components(moil_parser):
     assert moil_parser.sum_invoice_product_quantity(rows) == 976
 
 
-def test_moil_requires_one_invoice_and_one_packing_per_run(moil_parser):
+def test_moil_accepts_multiple_invoices_with_one_common_packing(moil_parser):
     assert moil_parser.has_document_count_mismatch(1, 1) is False
-    assert moil_parser.has_document_count_mismatch(7, 1) is True
+    assert moil_parser.has_document_count_mismatch(7, 1) is False
     assert moil_parser.has_document_count_mismatch(0, 1) is True
     assert moil_parser.has_document_count_mismatch(1, 0) is True
     assert moil_parser.has_document_count_mismatch(1, 2) is True
     assert moil_parser.has_document_count_mismatch(3, 2) is True
+
+
+def test_batch_conversion_matches_nested_in_cb_identifier(moil_parser):
+    packing_rows = [
+        {
+            "itemNo": "M101LT100",
+            "sscc": "100004392",
+            "pallet": "9",
+            "quantity": 240.0,
+            "boxes": 5.0,
+        },
+        {
+            "itemNo": "M101LT100",
+            "sscc": "100005635",
+            "nestedInCb": "100005636",
+            "pallet": "13",
+            "quantity": 5.0,
+            "boxes": 0.0,
+        },
+    ]
+    batch_rows = [
+        {
+            "itemNo": "M101LT100",
+            "pallet": "100004392",
+            "quantity": 5.0,
+            "quantityUnit": "boxes",
+        },
+        {
+            "itemNo": "M101LT100",
+            "pallet": "100005636",
+            "quantity": 5.0,
+            "quantityUnit": "boxes",
+        },
+    ]
+
+    warnings: list[str] = []
+    moil_parser.convert_batch_box_quantities_to_pieces(
+        batch_rows, packing_rows, warnings
+    )
+
+    assert warnings == []
+    assert batch_rows[0]["quantity"] == 240.0
+    assert batch_rows[0]["boxes"] == 5.0
+    assert batch_rows[1]["quantity"] == 5.0
+    assert batch_rows[1]["boxes"] == 0.0
+    assert all(row["quantityUnit"] == "pieces" for row in batch_rows)
+
+
+def test_batch_qty_already_in_pieces_keeps_quantity_and_gets_boxes(moil_parser):
+    packing_rows = [
+        {
+            "itemNo": "MP26TRAVELC",
+            "sscc": "100005654",
+            "pallet": "13",
+            "quantity": 384.0,
+            "boxes": 12.0,
+        }
+    ]
+    batch_rows = [
+        {
+            "itemNo": "MP26TRAVELC",
+            "pallet": "100005654",
+            "quantity": 384.0,
+            "quantityUnit": "boxes",
+        }
+    ]
+
+    warnings: list[str] = []
+    moil_parser.convert_batch_box_quantities_to_pieces(
+        batch_rows, packing_rows, warnings
+    )
+
+    assert warnings == []
+    assert batch_rows[0]["quantity"] == 384.0
+    assert batch_rows[0]["boxes"] == 12.0
+    assert batch_rows[0]["quantityUnit"] == "pieces"
+
+
+def test_batch_conversion_aggregates_multiple_packing_rows_on_same_pallet(
+    moil_parser,
+):
+    packing_rows = [
+        {
+            "itemNo": "SKU1",
+            "pallet": "13",
+            "quantity": 10.0,
+            "boxes": 1.0,
+        },
+        {
+            "itemNo": "SKU1",
+            "pallet": "13",
+            "quantity": 20.0,
+            "boxes": 2.0,
+        },
+    ]
+    batch_rows = [
+        {
+            "itemNo": "SKU1",
+            "pallet": "13",
+            "quantity": 3.0,
+            "quantityUnit": "boxes",
+        }
+    ]
+
+    warnings: list[str] = []
+    moil_parser.convert_batch_box_quantities_to_pieces(
+        batch_rows, packing_rows, warnings
+    )
+
+    assert warnings == []
+    assert batch_rows[0]["quantity"] == 30.0
+    assert batch_rows[0]["boxes"] == 3.0
+    assert batch_rows[0]["quantityUnit"] == "pieces"

@@ -18,13 +18,31 @@ const sourceInvoiceNumbers = [
   )
 ];
 if (
-  Number(pythonData.invoiceDocsCount || 0) !== 1 ||
-  Number(pythonData.packingDocsCount || 0) !== 1 ||
+  Number(pythonData.invoiceDocsCount || 0) < 1 ||
+  Number(pythonData.packingDocsCount || 0) !== 1
+) {
+  throw new Error(
+    'Для MOIL загрузите один или несколько invoice и ровно один общий packing'
+  );
+}
+if (
+  Number(pythonData.invoiceDocsCount || 0) > 1 &&
+  sourceInvoiceNumbers.length !== Number(pythonData.invoiceDocsCount)
+) {
+  throw new Error(
+    'Не удалось однозначно сопоставить все invoice-документы с их номерами'
+  );
+}
+if (
+  Number(pythonData.invoiceDocsCount || 0) === 1 &&
   sourceInvoiceNumbers.length > 1
 ) {
   throw new Error(
-    'MOIL обрабатывается отдельно: загрузите один invoice и один общий packing'
+    'В одном invoice-документе распознано несколько номеров invoice'
   );
+}
+if (Number(pythonData.batchDocsCount || 0) > 1) {
+  throw new Error('Для MOIL загрузите не более одного общего batch-файла');
 }
 
 const clean = (value) => String(value ?? '').trim();
@@ -268,9 +286,15 @@ for (const row of bundle.packingRows || []) {
   });
 }
 
-const selectPackingRowsForQuantity = (rows, targetQuantity) => {
+const selectPackingRowsForQuantity = (
+  rows,
+  targetQuantity,
+  allowAmbiguousExact = false
+) => {
   const target = parseNumber(targetQuantity);
-  if (!rows.length || target === null || target <= 0) return rows;
+  if (!rows.length || target === null || target <= 0) {
+    return { rows, exact: false, ambiguous: false };
+  }
 
   const MAX_EXACT_ROWS = 20;
   const MAX_SUBSETS = 5_000;
@@ -287,8 +311,12 @@ const selectPackingRowsForQuantity = (rows, targetQuantity) => {
     0
   );
 
-  if (allRowsHaveQuantity && totalKey === targetKey) return rows;
-  if (!allRowsHaveQuantity) return rows;
+  if (allRowsHaveQuantity && totalKey === targetKey) {
+    return { rows, exact: true, ambiguous: false };
+  }
+  if (!allRowsHaveQuantity) {
+    return { rows, exact: false, ambiguous: false };
+  }
 
   // The supplier's common packing can contain separate rows of the same SKU
   // for different invoices. Pick the exact row set for this invoice before
@@ -300,12 +328,18 @@ const selectPackingRowsForQuantity = (rows, targetQuantity) => {
     }))
     .filter(({ quantityKey: rowKey }) => rowKey > 0 && rowKey <= targetKey);
 
-  if (candidates.length > MAX_EXACT_ROWS) return rows;
+  if (candidates.length > MAX_EXACT_ROWS) {
+    return { rows, exact: false, ambiguous: false };
+  }
   if (
     candidates.length === 1 &&
     candidates[0].quantityKey === targetKey
   ) {
-    return [rows[candidates[0].index]];
+    return {
+      rows: [rows[candidates[0].index]],
+      exact: true,
+      ambiguous: false,
+    };
   }
 
   const subsets = new Map([
@@ -330,7 +364,9 @@ const selectPackingRowsForQuantity = (rows, targetQuantity) => {
         existing.ways = Math.min(2, existing.ways + state.ways);
         continue;
       }
-      if (subsets.size >= MAX_SUBSETS) return rows;
+      if (subsets.size >= MAX_SUBSETS) {
+        return { rows, exact: false, ambiguous: false };
+      }
       subsets.set(nextKey, {
         indexes: [...state.indexes, candidate.index],
         ways: state.ways,
@@ -339,8 +375,21 @@ const selectPackingRowsForQuantity = (rows, targetQuantity) => {
   }
 
   const selected = subsets.get(targetKey);
-  if (!selected?.indexes.length || selected.ways !== 1) return rows;
-  return selected.indexes.map((index) => rows[index]);
+  if (
+    !selected?.indexes.length ||
+    (selected.ways !== 1 && !allowAmbiguousExact)
+  ) {
+    return {
+      rows,
+      exact: false,
+      ambiguous: Boolean(selected?.indexes.length && selected.ways !== 1),
+    };
+  }
+  return {
+    rows: selected.indexes.map((index) => rows[index]),
+    exact: true,
+    ambiguous: selected.ways !== 1,
+  };
 };
 
 const batchMap = {};
@@ -361,6 +410,8 @@ for (const row of bundle.batchRows || []) {
     boxes: parseNumber(row.boxes),
     pallet: hasValue(row.pallet) ? String(row.pallet) : null,
     batchNo: clean(row.batchNo),
+    kitBatchNo: clean(row.kitBatchNo),
+    kitComponentDescription: clean(row.kitComponentDescription),
     prodDate: clean(row.prodDate),
     expDate: clean(row.expDate),
     barcode: gtinToText(row.barcode),
@@ -368,7 +419,68 @@ for (const row of bundle.batchRows || []) {
   });
 }
 
-const rawInvoiceRows = [...(bundle.invoiceRows || [])]
+const normalizeDescription = (value) => clean(value)
+  .toLowerCase()
+  .replace(/[^a-zа-яё0-9]+/gi, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const componentBatchRows = Object.values(batchMap)
+  .flat()
+  .filter((row) => row.kitComponentDescription);
+
+const componentBatchRowsFor = (row, parentItemNo) => {
+  const descriptionKey = normalizeDescription(row.description);
+  if (!descriptionKey) return [];
+  return componentBatchRows.filter(
+    (batch) =>
+      batch.itemNo === parentItemNo &&
+      normalizeDescription(batch.kitComponentDescription) === descriptionKey
+  );
+};
+
+const regularBatchRowsForItem = (itemNo) => (
+  (batchMap[itemNo] || []).filter((row) => !row.kitComponentDescription)
+);
+
+const hasKitComponentBatchesForItem = (itemNo) => (
+  (batchMap[itemNo] || []).some((row) => row.kitComponentDescription)
+);
+
+const packingIdentifierSet = (rows) => new Set(
+  rows.flatMap((row) => [row.sscc, row.nestedInCb, row.pallet])
+    .map((value) => clean(value))
+    .filter(Boolean)
+);
+
+const selectBatchRowsForPacking = (rows, packingRows) => {
+  if (!rows.length || !packingRows.length) return rows;
+  const identifiers = packingIdentifierSet(packingRows);
+  const palletRows = rows.filter((row) => clean(row.pallet));
+  if (!palletRows.length) return rows;
+  return rows.filter((row) => (
+    !clean(row.pallet) || identifiers.has(clean(row.pallet))
+  ));
+};
+
+const buildInvoiceRows = (
+  invoiceSourceRows,
+  packingSourceMap = packingMap,
+  allowAmbiguousExact = false
+) => {
+const packingSelections = {};
+const packingRowsForInvoice = (itemNo, quantity) => {
+  if (!packingSelections[itemNo]) {
+    packingSelections[itemNo] = selectPackingRowsForQuantity(
+      packingSourceMap[itemNo] || [],
+      quantity,
+      allowAmbiguousExact
+    );
+  }
+  return packingSelections[itemNo].rows;
+};
+
+const rawInvoiceRows = [...invoiceSourceRows]
   .map((row, idx) => ({
     ...row,
     __rowOrder: hasValue(row.__rowOrder) ? Number(row.__rowOrder) : idx + 1,
@@ -459,6 +571,13 @@ for (const row of aggregatedMainRows) {
 
 const displaySequence = [];
 const emittedMain = new Set();
+const mainItemNoByIndex = new Map();
+
+for (const row of rawInvoiceRows) {
+  if (!row.__isComponent && hasValue(row.itemIndex)) {
+    mainItemNoByIndex.set(String(row.itemIndex), normalizeCode(row.itemNo));
+  }
+}
 
 for (const row of rawInvoiceRows) {
   const itemNo = normalizeCode(row.itemNo);
@@ -469,6 +588,9 @@ for (const row of rawInvoiceRows) {
       type: 'component',
       row,
       itemNo,
+      parentItemNo: hasValue(row.itemIndex)
+        ? mainItemNoByIndex.get(String(row.itemIndex)) || null
+        : null,
       rowOrder: hasValue(row.__rowOrder) ? Number(row.__rowOrder) : 999999,
     });
     continue;
@@ -611,7 +733,7 @@ const buildComponentCustomsRow = (row) => {
   };
 };
 
-const buildComponentCzRows = (row) => {
+const buildComponentCzRows = (row, parentItemNo) => {
   const itemNo = normalizeCode(row.itemNo);
   const master = resolveMaster({ itemNo });
   const masterMissing = !master;
@@ -620,7 +742,11 @@ const buildComponentCzRows = (row) => {
   const packageMissing = !hasValue(master?.packageDescription);
   const customsCodeText = hasValue(master?.customsCode) ? String(master.customsCode).trim() : null;
   const gtinText = gtinToText(master?.gtin);
-  const batchRowsForItem = batchMap[itemNo] || [];
+  const directBatchRows = regularBatchRowsForItem(itemNo);
+  const describedComponentRows = componentBatchRowsFor(row, parentItemNo);
+  const batchRowsForItem = describedComponentRows.length
+    ? describedComponentRows
+    : directBatchRows;
 
   const buildWarnings = (finalGtin) => {
     const warnings = [];
@@ -702,10 +828,10 @@ for (const entry of displaySequence) {
 
   const invoiceRow = entry.row;
   const itemNo = invoiceRow.itemNo;
-  const batchRows = batchMap[itemNo] || [];
-  const packingRows = selectPackingRowsForQuantity(
-    packingMap[itemNo] || [],
-    invoiceRow.quantity
+  const packingRows = packingRowsForInvoice(itemNo, invoiceRow.quantity);
+  const batchRows = selectBatchRowsForPacking(
+    regularBatchRowsForItem(itemNo),
+    packingRows
   );
   const fallbackBatchBarcode = batchRows.find((r) => r.barcode)?.barcode || null;
   const master = resolveMaster({ itemNo, batchBarcode: fallbackBatchBarcode });
@@ -788,7 +914,7 @@ let czIndex = 1;
 
 for (const entry of displaySequence) {
   if (entry.type === 'component') {
-    for (const r of buildComponentCzRows(entry.row)) {
+    for (const r of buildComponentCzRows(entry.row, entry.parentItemNo)) {
       czRows.push(r);
     }
     continue;
@@ -796,11 +922,11 @@ for (const entry of displaySequence) {
 
   const invoiceRow = entry.row;
   const itemNo = invoiceRow.itemNo;
-  const packingRows = selectPackingRowsForQuantity(
-    packingMap[itemNo] || [],
-    invoiceRow.quantity
+  const packingRows = packingRowsForInvoice(itemNo, invoiceRow.quantity);
+  const batchRows = selectBatchRowsForPacking(
+    regularBatchRowsForItem(itemNo),
+    packingRows
   );
-  const batchRows = batchMap[itemNo] || [];
   const fallbackBatchBarcode = batchRows.find((r) => r.barcode)?.barcode || null;
   const master = resolveMaster({ itemNo, batchBarcode: fallbackBatchBarcode });
 
@@ -826,7 +952,13 @@ for (const entry of displaySequence) {
     if (!masterMissing && packageMissing) warnings.push('пустые пояснения к материалу и упаковке');
     if (!customsCodeText) warnings.push('не заполнен Код ТНВЭД');
     if (!packingRows.length) warnings.push(`нет строки в packing для ${itemNo}`);
-    if (hasAnyBatchFiles && !batchRows.length) warnings.push(`нет строки в batch для ${itemNo}`);
+    if (
+      hasAnyBatchFiles &&
+      !batchRows.length &&
+      !hasKitComponentBatchesForItem(itemNo)
+    ) {
+      warnings.push(`нет строки в batch для ${itemNo}`);
+    }
     if (hasNestedInCb) warnings.push('есть вложение IN CB');
     if (hasZeroBoxes) warnings.push('есть строка с boxes=0');
     if (hasMissingBoxes) warnings.push('есть строка без значения boxes');
@@ -851,7 +983,9 @@ for (const entry of displaySequence) {
       const batchPallet = clean(batch.pallet);
       const matchedPackingRows = batchPallet
         ? packingRows.filter((row) =>
-            clean(row.sscc) === batchPallet || clean(row.pallet) === batchPallet
+            clean(row.sscc) === batchPallet ||
+            clean(row.nestedInCb) === batchPallet ||
+            clean(row.pallet) === batchPallet
           )
         : packingRows;
       const allocatedPackingRows = matchedPackingRows.length
@@ -1059,6 +1193,72 @@ for (const entry of displaySequence) {
   }
 }
 
+return { customsRows, czRows, packingSelections };
+};
+
+const invoiceGroups = [];
+const invoiceGroupByNumber = new Map();
+for (const row of bundle.invoiceRows || []) {
+  const parsedInvoiceNo = clean(row.__invoiceNo);
+  const invoiceNo = parsedInvoiceNo || (
+    Number(bundle.invoiceDocsCount || 0) === 1
+      ? clean(bundle.invoiceNo) || clean(bundle.shipmentKey)
+      : ''
+  );
+  if (!invoiceNo) {
+    throw new Error('Не удалось определить номер invoice для строки');
+  }
+  if (!invoiceGroupByNumber.has(invoiceNo)) {
+    const group = { invoiceNo, rows: [] };
+    invoiceGroupByNumber.set(invoiceNo, group);
+    invoiceGroups.push(group);
+  }
+  invoiceGroupByNumber.get(invoiceNo).rows.push(row);
+}
+
+if (invoiceGroups.length !== Number(bundle.invoiceDocsCount || 0)) {
+  throw new Error(
+    `Количество распознанных invoice (${invoiceGroups.length}) не совпадает ` +
+    `с количеством документов (${Number(bundle.invoiceDocsCount || 0)})`
+  );
+}
+
+const customsSheets = [];
+const customsRows = [];
+const czRows = [];
+const remainingPackingMap = Object.fromEntries(
+  Object.entries(packingMap).map(([itemNo, rows]) => [itemNo, [...rows]])
+);
+const allowAmbiguousExact = invoiceGroups.length > 1;
+for (const group of invoiceGroups) {
+  const built = buildInvoiceRows(
+    group.rows,
+    remainingPackingMap,
+    allowAmbiguousExact
+  );
+  customsSheets.push({
+    invoiceNo: group.invoiceNo,
+    sheetName: group.invoiceNo,
+    rows: built.customsRows,
+  });
+  customsRows.push(...built.customsRows);
+  czRows.push(...built.czRows);
+
+  for (const [itemNo, selection] of Object.entries(built.packingSelections)) {
+    if (!selection.exact) continue;
+    const consumed = new Set(selection.rows);
+    remainingPackingMap[itemNo] = (remainingPackingMap[itemNo] || [])
+      .filter((row) => !consumed.has(row));
+  }
+}
+
+let combinedCzIndex = 1;
+for (const row of czRows) {
+  if (row['#'] !== null && row['#'] !== undefined) {
+    row['#'] = combinedCzIndex++;
+  }
+}
+
 return [{
   json: {
     shipmentKey: bundle.shipmentKey,
@@ -1066,7 +1266,9 @@ return [{
     invoiceDocsCount: bundle.invoiceDocsCount,
     packingDocsCount: bundle.packingDocsCount,
     batchDocsCount: bundle.batchDocsCount || 0,
+    customsSheets,
     customsRows,
+    czSheetName: `ЧЗ ${bundle.shipmentKey}`,
     czRows,
     warnings: bundle.warnings || [],
     chatId: bundle.chatId,

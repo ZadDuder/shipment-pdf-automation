@@ -832,8 +832,8 @@ def sum_invoice_product_quantity(rows: Sequence[Dict[str, Any]]) -> Decimal:
 
 
 def has_document_count_mismatch(invoice_count: int, packing_count: int) -> bool:
-    # Each run builds one table from one invoice plus its common packing list.
-    return invoice_count != 1 or packing_count != 1
+    # One shipment may contain multiple invoices, but they all share one packing.
+    return invoice_count < 1 or packing_count != 1
 
 
 def format_excel_date(value: Any) -> Optional[str]:
@@ -906,6 +906,10 @@ def parse_batch_xlsx(entry: Dict[str, Any], shipment_key: str, warnings: List[st
             barcode_raw = get_value(row, 'EAN')
             parsed_barcode = re.sub(r'\D', '', str(barcode_raw or '')) or None
             current_barcode = parsed_barcode or current_barcode
+            kit_component = normalize_space(get_value(row, 'Kit component'))
+            is_kit_component = bool(
+                kit_component and kit_component.upper() != 'N/A'
+            )
             batch_no = normalize_space(get_value(row, 'Batch No'))
             if not current_item_no or not batch_no:
                 continue
@@ -915,9 +919,11 @@ def parse_batch_xlsx(entry: Dict[str, Any], shipment_key: str, warnings: List[st
                 'wmsItemCode': '',
                 'itemFrgnName': current_description,
                 'quantity': quantity,
-                'quantityUnit': 'boxes',
-                'boxes': quantity,
+                'quantityUnit': 'pieces' if is_kit_component else 'boxes',
+                'boxes': None if is_kit_component else quantity,
                 'batchNo': batch_no,
+                'kitBatchNo': normalize_space(get_value(row, 'Kit Batch No')) or None,
+                'kitComponentDescription': kit_component if is_kit_component else None,
                 'prodDate': format_excel_date(get_value(row, 'Prod. date')),
                 'expDate': format_excel_date(get_value(row, 'Exp. date')),
                 'barcode': current_barcode,
@@ -963,15 +969,28 @@ def convert_batch_box_quantities_to_pieces(
     packing_groups: Dict[Tuple[str, str], Dict[str, float]] = {}
     for row in packing_rows:
         item_no = normalize_sku(row.get('itemNo'))
-        pallet = normalize_space(row.get('sscc') or row.get('pallet'))
         quantity = dec_to_num(parse_decimal(row.get('quantity')))
-        boxes = dec_to_num(parse_decimal(row.get('boxes')))
-        if not item_no or not pallet or quantity is None or boxes is None:
+        boxes_raw = row.get('boxes')
+        boxes = (
+            0.0
+            if boxes_raw in (0, 0.0, '0', '0.0')
+            else dec_to_num(parse_decimal(boxes_raw))
+        )
+        identifiers = {
+            normalize_space(row.get('sscc')),
+            normalize_space(row.get('nestedInCb')),
+            normalize_space(row.get('pallet')),
+        }
+        identifiers.discard('')
+        if not item_no or not identifiers or quantity is None or boxes is None:
             continue
-        key = (item_no, pallet)
-        group = packing_groups.setdefault(key, {'quantity': 0.0, 'boxes': 0.0})
-        group['quantity'] += quantity
-        group['boxes'] += boxes
+        for identifier in identifiers:
+            group = packing_groups.setdefault(
+                (item_no, identifier),
+                {'quantity': 0.0, 'boxes': 0.0},
+            )
+            group['quantity'] += float(quantity)
+            group['boxes'] += float(boxes)
 
     batch_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for row in batch_rows:
@@ -987,10 +1006,28 @@ def convert_batch_box_quantities_to_pieces(
         batch_boxes = sum(
             dec_to_num(parse_decimal(row.get('quantity'))) or 0.0 for row in rows
         )
-        if not packing or packing['boxes'] <= 0 or batch_boxes <= 0:
+        if not packing or batch_boxes <= 0:
             warnings.append(
                 f'[batch] Не удалось сопоставить коробки batch с packing для {key[0]}, паллета {key[1]}'
             )
+            continue
+        if abs(packing['quantity'] - batch_boxes) <= 0.01:
+            allocated_boxes = 0.0
+            for row_index, row in enumerate(rows):
+                pieces = float(
+                    dec_to_num(parse_decimal(row.get('quantity'))) or 0.0
+                )
+                if row_index == len(rows) - 1:
+                    boxes = packing['boxes'] - allocated_boxes
+                else:
+                    boxes = round(
+                        packing['boxes'] * pieces / batch_boxes,
+                        6,
+                    )
+                    allocated_boxes += boxes
+                row['boxes'] = float(boxes)
+                row['quantity'] = pieces
+                row['quantityUnit'] = 'pieces'
             continue
         if abs(packing['boxes'] - batch_boxes) > 0.01:
             warnings.append(
@@ -1162,7 +1199,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     convert_batch_box_quantities_to_pieces(batch_rows, packing_rows, warnings)
 
     if has_document_count_mismatch(len(invoice_entries), len(packing_entries)):
-        warnings.append(f'[validate] Количество invoice файлов ({len(invoice_entries)}) != packing файлов ({len(packing_entries)})')
+        warnings.append(
+            f'[validate] Требуется один или несколько invoice и ровно один общий packing; '
+            f'получено invoice={len(invoice_entries)}, packing={len(packing_entries)}'
+        )
     if not invoice_rows:
         warnings.append(f'[validate] По поставке {shipment_key} не распознано ни одной строки invoice')
     if not packing_rows:
