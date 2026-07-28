@@ -911,15 +911,34 @@ for (const entry of displaySequence) {
 
 const czRows = [];
 let czIndex = 1;
+const czRowsByEntry = new Map();
 
 for (const entry of displaySequence) {
   if (entry.type === 'component') {
-    for (const r of buildComponentCzRows(entry.row, entry.parentItemNo)) {
+    const describedBatchRows = componentBatchRowsFor(
+      entry.row,
+      entry.parentItemNo
+    );
+    const directBatchRows = regularBatchRowsForItem(entry.itemNo);
+    const componentBatchRowsForEntry = describedBatchRows.length
+      ? describedBatchRows
+      : directBatchRows;
+    const componentRows = buildComponentCzRows(
+      entry.row,
+      entry.parentItemNo
+    );
+    for (const r of componentRows) {
       czRows.push(r);
     }
+    czRowsByEntry.set(entry, {
+      rows: componentRows,
+      batchRows: componentBatchRowsForEntry,
+      baseQuantity: parseNumber(entry.row.quantity),
+    });
     continue;
   }
 
+  const czStartIndex = czRows.length;
   const invoiceRow = entry.row;
   const itemNo = invoiceRow.itemNo;
   const packingRows = packingRowsForInvoice(itemNo, invoiceRow.quantity);
@@ -1191,7 +1210,180 @@ for (const entry of displaySequence) {
       });
     }
   }
+
+  const mainRows = czRows.slice(czStartIndex);
+  let blocks;
+  if (batchRows.length) {
+    blocks = batchRows.map((batch, index) => {
+      const batchPallet = clean(batch.pallet);
+      const matchedPackingRows = batchPallet
+        ? packingRows.filter((row) => (
+            clean(row.sscc) === batchPallet ||
+            clean(row.nestedInCb) === batchPallet ||
+            clean(row.pallet) === batchPallet
+          ))
+        : packingRows;
+      const blockPackingRows = matchedPackingRows.length
+        ? matchedPackingRows
+        : packingRows;
+      return {
+        quantity: mainRows[index]?.['Quantity Количество'] ?? batch.quantity,
+        identifiers: packingIdentifierSet(blockPackingRows),
+      };
+    });
+  } else if (packingRows.length) {
+    blocks = splitPackingByPallet(packingRows).map((split, index) => {
+      const blockPackingRows = packingRows.filter(
+        (row) => clean(row.pallet) === clean(split.palletKey)
+      );
+      return {
+        quantity: mainRows[index]?.['Quantity Количество'] ?? split.quantity,
+        identifiers: packingIdentifierSet(blockPackingRows),
+      };
+    });
+  } else {
+    blocks = [{
+      quantity: mainRows[0]?.['Quantity Количество'] ?? invoiceRow.quantity,
+      identifiers: new Set(),
+    }];
+  }
+  czRowsByEntry.set(entry, {
+    rows: mainRows,
+    blocks,
+    baseQuantity: parseNumber(invoiceRow.quantity),
+  });
 }
+
+const componentsByParent = new Map();
+const mainEntryByItemNo = new Map();
+for (const entry of displaySequence) {
+  if (entry.type === 'main') {
+    mainEntryByItemNo.set(entry.itemNo, entry);
+    continue;
+  }
+  if (!entry.parentItemNo) continue;
+  if (!componentsByParent.has(entry.parentItemNo)) {
+    componentsByParent.set(entry.parentItemNo, []);
+  }
+  componentsByParent.get(entry.parentItemNo).push(entry);
+}
+
+const allocateComponentRowsToBlocks = (parentResult, componentResult) => {
+  const blocks = parentResult.blocks || [];
+  if (!blocks.length) return [];
+
+  const allocations = blocks.map(() => []);
+  const componentRows = componentResult.rows || [];
+  const componentBatches = componentResult.batchRows || [];
+  const parentQuantity = Number(parentResult.baseQuantity || 0);
+  const componentQuantity = Number(componentResult.baseQuantity || 0);
+  const componentRatio = parentQuantity
+    ? componentQuantity / parentQuantity
+    : null;
+  const expectedQuantity = (block) => (
+    componentRatio !== null && hasValue(block.quantity)
+      ? round2(Number(block.quantity) * componentRatio)
+      : null
+  );
+
+  if (!componentBatches.length) {
+    const baseRow = componentRows[0];
+    if (!baseRow) return allocations;
+    for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
+      const quantity = expectedQuantity(blocks[blockIndex]);
+      allocations[blockIndex].push({
+        ...baseRow,
+        'Quantity Количество': quantity ?? baseRow['Quantity Количество'],
+      });
+    }
+    return allocations;
+  }
+
+  const blockUseCounts = blocks.map(() => 0);
+  for (let rowIndex = 0; rowIndex < componentRows.length; rowIndex += 1) {
+    const row = componentRows[rowIndex];
+    const batch = componentBatches[rowIndex] || null;
+    const batchIdentifier = clean(batch?.pallet);
+    let candidates = [];
+
+    if (batchIdentifier) {
+      candidates = blocks
+        .map((block, blockIndex) => (
+          block.identifiers.has(batchIdentifier) ? blockIndex : -1
+        ))
+        .filter((blockIndex) => blockIndex >= 0);
+    }
+
+    if (candidates.length !== 1) {
+      const rowQuantity = parseNumber(row['Quantity Количество']);
+      candidates = blocks
+        .map((block, blockIndex) => {
+          const expected = expectedQuantity(block);
+          return (
+            rowQuantity !== null &&
+            expected !== null &&
+            Math.abs(Number(rowQuantity) - Number(expected)) < 0.01
+          ) ? blockIndex : -1;
+        })
+        .filter((blockIndex) => blockIndex >= 0);
+    }
+
+    let blockIndex;
+    if (candidates.length) {
+      blockIndex = [...candidates].sort(
+        (a, b) => blockUseCounts[a] - blockUseCounts[b] || a - b
+      )[0];
+    } else {
+      blockIndex = Math.min(rowIndex, blocks.length - 1);
+    }
+    allocations[blockIndex].push(row);
+    blockUseCounts[blockIndex] += 1;
+  }
+
+  return allocations;
+};
+
+const orderedCzRows = [];
+for (const entry of displaySequence) {
+  const entryResult = czRowsByEntry.get(entry);
+  if (!entryResult) continue;
+
+  if (entry.type === 'component') {
+    if (
+      !entry.parentItemNo ||
+      !mainEntryByItemNo.has(entry.parentItemNo)
+    ) {
+      orderedCzRows.push(...entryResult.rows);
+    }
+    continue;
+  }
+
+  const components = componentsByParent.get(entry.itemNo) || [];
+  if (!components.length) {
+    orderedCzRows.push(...entryResult.rows);
+    continue;
+  }
+
+  const componentAllocations = components.map((componentEntry) => (
+    allocateComponentRowsToBlocks(
+      entryResult,
+      czRowsByEntry.get(componentEntry)
+    )
+  ));
+
+  for (
+    let blockIndex = 0;
+    blockIndex < entryResult.rows.length;
+    blockIndex += 1
+  ) {
+    orderedCzRows.push(entryResult.rows[blockIndex]);
+    for (const allocations of componentAllocations) {
+      orderedCzRows.push(...(allocations[blockIndex] || []));
+    }
+  }
+}
+czRows.length = 0;
+czRows.push(...orderedCzRows);
 
 return { customsRows, czRows, packingSelections };
 };

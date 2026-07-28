@@ -204,6 +204,149 @@ def test_kit_component_batches_attach_by_component_description():
     assert component_rows[0]["Batch No"] == "0201FA"
 
 
+def test_kit_breakdown_is_repeated_directly_under_each_parent_pallet_row():
+    bundle = base_bundle(
+        [
+            {
+                "itemIndex": 1,
+                "itemNo": "MP26TRAVELC",
+                "description": "Travel Kit 2026 - Hydration",
+                "quantity": 976,
+                "unitPriceBeforeDiscount": 10.35,
+                "totalBeforeDiscount": 10101.6,
+                "discountPercentage": 0,
+                "unitPriceAfterDiscount": 10.35,
+                "totalPriceAfterDiscount": 10101.6,
+                "commercialDiscount": 0,
+                "__invoiceNo": "126022812",
+                "__rowOrder": 1,
+                "__isComponent": False,
+            },
+            {
+                "itemIndex": 1,
+                "itemNo": "BAGM26TRAVEL",
+                "description": "BAG For Travel Kit 2026",
+                "quantity": 976,
+                "__invoiceNo": "126022812",
+                "__rowOrder": 2,
+                "__isComponent": True,
+            },
+            {
+                "itemIndex": 1,
+                "itemNo": "M101UM25",
+                "description": "Moroccanoil Treatment Mist 25ml",
+                "quantity": 976,
+                "__invoiceNo": "126022812",
+                "__rowOrder": 3,
+                "__isComponent": True,
+            },
+        ]
+    )
+    bundle["batchDocsCount"] = 1
+    bundle["batchFiles"] = ["LOAD0006732.xlsx"]
+    bundle["packingRows"] = [
+        {
+            "itemNo": "MP26TRAVELC",
+            "quantity": 96,
+            "boxes": 12,
+            "weight": 60,
+            "pallet": "14",
+            "sscc": "100005654",
+        },
+        {
+            "itemNo": "MP26TRAVELC",
+            "quantity": 576,
+            "boxes": 72,
+            "weight": 360,
+            "pallet": "15",
+            "sscc": "100005694",
+        },
+        {
+            "itemNo": "MP26TRAVELC",
+            "quantity": 304,
+            "boxes": 38,
+            "weight": 190,
+            "pallet": "16",
+            "sscc": "100005971",
+        },
+    ]
+    bundle["batchRows"] = [
+        {
+            "itemNo": "MP26TRAVELC",
+            "kitComponentDescription": "Moroccanoil Treatment Mist 25ml",
+            "quantity": 576,
+            "quantityUnit": "pieces",
+            "pallet": "100005694",
+            "batchNo": "BATCH-15",
+        },
+        {
+            "itemNo": "MP26TRAVELC",
+            "kitComponentDescription": "Moroccanoil Treatment Mist 25ml",
+            "quantity": 96,
+            "quantityUnit": "pieces",
+            "pallet": "100005654",
+            "batchNo": "BATCH-14",
+        },
+        {
+            "itemNo": "MP26TRAVELC",
+            "kitComponentDescription": "Moroccanoil Treatment Mist 25ml",
+            "quantity": 304,
+            "quantityUnit": "pieces",
+            "pallet": "100005971",
+            "batchNo": "BATCH-16",
+        },
+    ]
+
+    result = run_build_node(
+        bundle,
+        [
+            master_row("MP26TRAVELC", "KIT", "7290121931526"),
+            master_row("BAGM26TRAVEL", "BAG", "7290000000001"),
+            master_row("M101UM25", "977973", "7290116977973"),
+        ],
+    )
+
+    rows = result["czSheets"][0]["rows"]
+    assert [
+        (
+            row["Item No."],
+            row["Quantity Количество"],
+            row["№ паллета"],
+            row["Batch No"],
+            row["#"],
+        )
+        for row in rows
+    ] == [
+        ("MP26TRAVELC", 96, "14", None, 1),
+        ("BAGM26TRAVEL", 96, None, None, None),
+        ("M101UM25", 96, None, "BATCH-14", None),
+        ("MP26TRAVELC", 576, "15", None, 2),
+        ("BAGM26TRAVEL", 576, None, None, None),
+        ("M101UM25", 576, None, "BATCH-15", None),
+        ("MP26TRAVELC", 304, "16", None, 3),
+        ("BAGM26TRAVEL", 304, None, None, None),
+        ("M101UM25", 304, None, "BATCH-16", None),
+    ]
+    assert sum(
+        row["Quantity Количество"]
+        for row in rows
+        if row["Item No."] == "BAGM26TRAVEL"
+    ) == 976
+    assert sum(
+        row["Quantity Количество"]
+        for row in rows
+        if row["Item No."] == "M101UM25"
+    ) == 976
+    assert all(
+        row["Total,$"] is None
+        and row["Количество коробок, шт."] is None
+        and row["Вес, кг"] is None
+        and row["№ паллета"] is None
+        for row in rows
+        if row["#"] is None
+    )
+
+
 def test_same_component_description_is_scoped_to_parent_kit():
     bundle = base_bundle(
         [
