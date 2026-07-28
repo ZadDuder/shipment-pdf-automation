@@ -421,7 +421,7 @@ def test_explicit_zero_boxes_are_not_turned_into_one():
     assert result["czRows"][0]["__warning_boxes_zero"] is True
 
 
-def test_multiple_invoice_documents_create_separate_customs_and_one_cz_sheet():
+def test_multiple_invoice_documents_create_customs_and_cz_pair_per_invoice():
     bundle = base_bundle(
         [
             {
@@ -460,8 +460,16 @@ def test_multiple_invoice_documents_create_separate_customs_and_one_cz_sheet():
     assert [row["Item No."] for row in result["customsSheets"][1]["rows"]] == [
         "SKU-B"
     ]
-    assert result["czSheetName"] == "ЧЗ TEST"
-    assert [row["Item No."] for row in result["czRows"]] == ["SKU-A", "SKU-B"]
+    assert [sheet["sheetName"] for sheet in result["czSheets"]] == [
+        "ЧЗ INV-A",
+        "ЧЗ INV-B",
+    ]
+    assert [row["Item No."] for row in result["czSheets"][0]["rows"]] == [
+        "SKU-A"
+    ]
+    assert [row["Item No."] for row in result["czSheets"][1]["rows"]] == [
+        "SKU-B"
+    ]
 
 
 def test_equal_quantity_invoices_consume_distinct_packing_rows():
@@ -521,9 +529,17 @@ def test_equal_quantity_invoices_consume_distinct_packing_rows():
         ("INV-B", 2, 20, "2"),
     ]
     assert [
-        (row["Количество коробок, шт."], row["Вес, кг"], row["№ паллета"])
-        for row in result["czRows"]
-    ] == [(1, 10, "1"), (2, 20, "2")]
+        (
+            sheet["invoiceNo"],
+            sheet["rows"][0]["Количество коробок, шт."],
+            sheet["rows"][0]["Вес, кг"],
+            sheet["rows"][0]["№ паллета"],
+        )
+        for sheet in result["czSheets"]
+    ] == [
+        ("INV-A", 1, 10, "1"),
+        ("INV-B", 2, 20, "2"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -681,11 +697,10 @@ def test_m101lt100_is_allocated_between_regular_and_foc_invoices():
     assert by_invoice["126022816"]["Вес, кг"] == 69.1
     assert by_invoice["126022816"]["№ паллета"] == "9"
 
-    m101_rows = [
-        row for row in result["czRows"]
-        if row["Item No."] == "M101LT100"
-    ]
-    assert len(m101_rows) == 2
+    cz_by_invoice = {
+        sheet["invoiceNo"]: sheet["rows"]
+        for sheet in result["czSheets"]
+    }
     assert [
         (
             row["Quantity Количество"],
@@ -694,11 +709,20 @@ def test_m101lt100_is_allocated_between_regular_and_foc_invoices():
             row["№ паллета"],
             row["Batch No"],
         )
-        for row in m101_rows
-    ] == [
-        (5, 0, 1.35, "13", "14477BZ"),
-        (240, 5, 69.1, "9", "14734LDZ"),
-    ]
+        for row in cz_by_invoice["126022814"]
+        if row["Item No."] == "M101LT100"
+    ] == [(5, 0, 1.35, "13", "14477BZ")]
+    assert [
+        (
+            row["Quantity Количество"],
+            row["Количество коробок, шт."],
+            row["Вес, кг"],
+            row["№ паллета"],
+            row["Batch No"],
+        )
+        for row in cz_by_invoice["126022816"]
+        if row["Item No."] == "M101LT100"
+    ] == [(240, 5, 69.1, "9", "14734LDZ")]
 
 
 def test_single_invoice_keeps_customer_examples_separate_and_complete():

@@ -1224,6 +1224,7 @@ if (invoiceGroups.length !== Number(bundle.invoiceDocsCount || 0)) {
 }
 
 const customsSheets = [];
+const czSheets = [];
 const customsRows = [];
 const czRows = [];
 const remainingPackingMap = Object.fromEntries(
@@ -1241,6 +1242,11 @@ for (const group of invoiceGroups) {
     sheetName: group.invoiceNo,
     rows: built.customsRows,
   });
+  czSheets.push({
+    invoiceNo: group.invoiceNo,
+    sheetName: `ЧЗ ${group.invoiceNo}`,
+    rows: built.czRows,
+  });
   customsRows.push(...built.customsRows);
   czRows.push(...built.czRows);
 
@@ -1252,13 +1258,6 @@ for (const group of invoiceGroups) {
   }
 }
 
-let combinedCzIndex = 1;
-for (const row of czRows) {
-  if (row['#'] !== null && row['#'] !== undefined) {
-    row['#'] = combinedCzIndex++;
-  }
-}
-
 return [{
   json: {
     shipmentKey: bundle.shipmentKey,
@@ -1267,8 +1266,8 @@ return [{
     packingDocsCount: bundle.packingDocsCount,
     batchDocsCount: bundle.batchDocsCount || 0,
     customsSheets,
+    czSheets,
     customsRows,
-    czSheetName: `ЧЗ ${bundle.shipmentKey}`,
     czRows,
     warnings: bundle.warnings || [],
     chatId: bundle.chatId,

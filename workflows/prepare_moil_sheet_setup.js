@@ -7,9 +7,15 @@ if (!data || !data.shipmentKey) {
 const customsSheetNames = (data.customsSheets || [])
   .map((sheet) => String(sheet.sheetName || '').trim())
   .filter(Boolean);
+const czSheetNames = (data.czSheets || [])
+  .map((sheet) => String(sheet.sheetName || '').trim())
+  .filter(Boolean);
 
-if (!customsSheetNames.length) {
-  throw new Error('Не сформирован ни один таможенный лист по invoice');
+if (
+  !customsSheetNames.length ||
+  czSheetNames.length !== customsSheetNames.length
+) {
+  throw new Error('Не сформированы пары таможня/ЧЗ для каждого invoice');
 }
 
 return [{
@@ -17,7 +23,7 @@ return [{
     spreadsheetId: '1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k',
     shipmentKey: String(data.shipmentKey),
     customsSheetNames,
-    czSheetName: String(data.czSheetName || `ЧЗ ${data.shipmentKey}`),
+    czSheetNames,
     templateCustomsName: 'TEMPLATE_CUSTOMS',
     templateCzName: 'TEMPLATE_CZ',
   }

@@ -58,9 +58,9 @@ def main() -> int:
         "\"'!A2:ZZ\") } }}"
     )
     clear_cz_body = (
-        "={{ { ranges: [\"'\" + String($json.czSheetName || "
-        "(\"ЧЗ \" + $json.shipmentKey)).replace(/'/g, \"''\") + "
-        "\"'!A2:ZZ\"] } }}"
+        "={{ { ranges: ($json.czSheets || []).map((sheet) => "
+        "\"'\" + String(sheet.sheetName).replace(/'/g, \"''\") + "
+        "\"'!A2:ZZ\") } }}"
     )
     write_body = (
         "={{ { valueInputOption: $json.valueInputOption, data: $json.data } }}"

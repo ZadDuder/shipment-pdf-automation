@@ -31,7 +31,7 @@ def test_workflow_uses_current_moil_spreadsheet_only():
     assert OBSOLETE_MOIL_SPREADSHEET not in serialized
 
 
-def test_moil_workflow_writes_per_invoice_customs_and_one_combined_cz():
+def test_moil_workflow_writes_customs_and_cz_pair_per_invoice():
     workflow = _workflow()
     nodes = {node["name"]: node for node in workflow["nodes"]}
 
@@ -40,8 +40,10 @@ def test_moil_workflow_writes_per_invoice_customs_and_one_combined_cz():
     summary_code = nodes["Prepare Summary Message1"]["parameters"]["jsCode"]
 
     assert "customsSheetNames" in setup_code
+    assert "czSheetNames" in setup_code
     assert "for (const sheetName of setup.customsSheetNames)" in create_code
-    assert "общей вкладке" in summary_code
+    assert "for (const sheetName of setup.czSheetNames)" in create_code
+    assert "парах вкладок" in summary_code
 
     for node_name in ("Clear Customs Sheet", "Clear CZ Sheet"):
         node = nodes[node_name]

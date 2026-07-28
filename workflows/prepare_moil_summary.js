@@ -10,11 +10,18 @@ if (!data || !data.shipmentKey) {
 }
 
 const customsSheets = data.customsSheets || [];
-const customsSheetNames = customsSheets.map((sheet) => sheet.sheetName);
+const czSheets = data.czSheets || [];
 const customsRowsCount = customsSheets.reduce(
   (sum, sheet) => sum + (sheet.rows || []).length,
   0
 );
+const czRowsCount = czSheets.reduce(
+  (sum, sheet) => sum + (sheet.rows || []).length,
+  0
+);
+const sheetPairs = customsSheets.map((sheet, index) => (
+  `• ${sheet.sheetName} / ${czSheets[index]?.sheetName || 'ЧЗ не сформирован'}`
+));
 const warnings = data.warnings || [];
 
 let message =
@@ -26,10 +33,9 @@ let message =
   `🏷️ Batch документов: ${data.batchDocsCount || 0}\n\n` +
   `📊 Результаты:\n` +
   `• Таможня: ${customsRowsCount} строк в ${customsSheets.length} вкладках\n` +
-  `• Честный Знак: ${(data.czRows || []).length} строк в общей вкладке\n\n` +
-  `Вкладки:\n` +
-  customsSheetNames.map((name) => `• ${name}`).join('\n') +
-  `\n• ${data.czSheetName || `ЧЗ ${data.shipmentKey}`}`;
+  `• Честный Знак: ${czRowsCount} строк в ${czSheets.length} вкладках\n\n` +
+  `Результат сформирован в ${customsSheets.length} парах вкладок:\n` +
+  sheetPairs.join('\n');
 
 if (warnings.length > 0) {
   message += `\n\n⚠️ Предупреждения:\n`;

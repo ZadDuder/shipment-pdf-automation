@@ -35,12 +35,14 @@ for (const sheetName of setup.customsSheetNames) {
   });
 }
 
-const czExists = titleToSheetId.has(setup.czSheetName);
-if (!czExists) {
+const missingCzSheetNames = [];
+for (const sheetName of setup.czSheetNames) {
+  if (titleToSheetId.has(sheetName)) continue;
+  missingCzSheetNames.push(sheetName);
   requests.push({
     duplicateSheet: {
       sourceSheetId: templateCzSheetId,
-      newSheetName: setup.czSheetName,
+      newSheetName: sheetName,
     }
   });
 }
@@ -49,7 +51,7 @@ return [{
   json: {
     ...setup,
     missingCustomsSheetNames,
-    czExists,
+    missingCzSheetNames,
     templateCustomsSheetId,
     templateCzSheetId,
     requests,
