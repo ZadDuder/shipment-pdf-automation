@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synchronize maintained workflow node sources/config into final.json."""
+"""Synchronize maintained MOIL node sources/config into final.json."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ HTTP_CREDENTIALS = {
 
 CODE_SOURCES = {
     "Build Customs and CZ Rows": "workflows/build_moil.js",
-    "Build Moroccanoil Customs and CZ Rows": "workflows/build_moroccanoil.js",
     "Prepare Sheet Setup Data": "workflows/prepare_moil_sheet_setup.js",
     "Build Create Requests": "workflows/build_moil_create_requests.js",
     "Prepare Customs Rows": "workflows/prepare_moil_customs_write.js",

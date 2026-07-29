@@ -27,7 +27,6 @@ journalctl -u tg-upload-bot -n 100 --no-pager
 - Workflow id: `oAsH9xGYN9uxtLPF`.
 - Webhook path: `tg-upload-finished`.
 - MOIL Code node: `Build Customs and CZ Rows`.
-- MOROCCANOIL Code node: `Build Moroccanoil Customs and CZ Rows`.
 - Production MOIL spreadsheet:
   `1Av1S2wFoiLrIeeaBO-gFGgsBtzuwMgL1ziVd2lS6c3k`.
 - Production BANDI spreadsheet:
@@ -71,36 +70,6 @@ Google credentials хранятся в n8n. Они не экспортируют
 
 Откат: восстановить parser и SQLite из созданных в том же релизе backup-файлов
 и перезапустить `n8n`.
-
-## Контракт наборов MOROCCANOIL
-
-- Строки invoice без номера позиции считаются составом ближайшего
-  предшествующего набора в том же invoice.
-- В таможне состав идёт сразу под родительской строкой.
-- В ЧЗ состав повторяется под каждой pallet/batch-строкой родителя с
-  пропорционально пересчитанным количеством.
-- У строк состава пустые номер, денежные, packing- и batch-поля.
-- Одинаковые SKU из разных invoice остаются отдельными родительскими строками;
-  packing/batch из исходных документов не используются повторно.
-- При нескольких batch общие коробки и вес родителя распределяются
-  пропорционально batch quantity, а не копируются в каждую строку.
-- Поддерживаемый исходник build-ноды:
-  `workflows/build_moroccanoil.js`.
-
-### Статус релиза 2026-07-29
-
-- MOROCCANOIL kits развёрнуты в workflow `oAsH9xGYN9uxtLPF`.
-- Production SHA-256 build-ноды:
-  `ebd2d446599015b90556c64df805061b9174a427242c6ffca74df817f52d9d7b`.
-- Backup SQLite:
-  `/opt/n8n/.n8n/database.sqlite.backup-moroc-kits-20260729T141545Z`
-  (`0600`).
-- `workflow_entity` и активная `workflow_history` совпадают; n8n активен,
-  `/healthz` возвращает `{"status":"ok"}`.
-- На Node.js 20.20.2 прошли 7 MOROCCANOIL-регрессий; реальные поставки
-  `7260185` и `8251014` проверены на порядке строк, quantity, суммах и
-  изоляции batch.
-- Parser и ветки MOIL/BANDI в этом релизе не менялись.
 
 ## Правила секретов
 
