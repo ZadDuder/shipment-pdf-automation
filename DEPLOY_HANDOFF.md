@@ -1,6 +1,6 @@
 # Production handoff
 
-Актуально на 2026-07-28. Этот документ не содержит паролей, токенов и закрытых
+Актуально на 2026-07-30. Этот документ не содержит паролей, токенов и закрытых
 ключей. Доступы передаются отдельно через менеджер секретов.
 
 ## Сервер и сервисы
@@ -70,6 +70,28 @@ Google credentials хранятся в n8n. Они не экспортируют
 
 Откат: восстановить parser и SQLite из созданных в том же релизе backup-файлов
 и перезапустить `n8n`.
+
+## Безопасный релиз MOROCCANOIL F&O
+
+1. Обрабатывать каждый новый комплект отдельно по `ILSO`: invoice, packing и
+   соответствующий batch. Не смешивать частично присланные комплекты.
+2. Локально прогнать `tests/test_parse_moroccanoil_fno.py`.
+3. Сформировать bundle для каждого контрольного `ILSO` и запустить
+   `scripts/verify_moroccanoil_build.js` через Node.js 20+.
+4. Перед релизом создать timestamp-backup:
+   - `/data/moil/parse_moroccanoil_bundle.py`;
+   - `/opt/n8n/.n8n/database.sqlite`.
+5. Обновить parser и ноду `Build Moroccanoil Customs and CZ Rows` через
+   `scripts/update_n8n_workflow.py`; источник ноды —
+   `workflows/build_moroccanoil.js`.
+6. После запуска проверить `systemctl is-active n8n`, `/healthz`, SQLite
+   `PRAGMA integrity_check` и хеши установленных файлов.
+7. Контрольные инварианты:
+   - invoice quantity совпадает с packing quantity по агрегату SKU;
+   - batch quantity после конвертации совпадает с packing pieces;
+   - FOC сохраняет `Total,$ = 0`;
+   - `boxes=0` остаётся нулём;
+   - вес/коробки batch-строки относятся только к её паллете.
 
 ## Правила секретов
 

@@ -24,6 +24,17 @@ except Exception:
 INVOICE_NO_RE = re.compile(r'Invoice No\.?\s*[:#]?\s*([0-9A-Za-z\-/]+)', re.I)
 PACKAGE_HEADER_RE_INLINE = re.compile(r'^\s*(\d+)\s+((?:PL|CB)\d+)\s+(?:PL|CB)\b', re.I)
 PACKAGE_HEADER_RE_SPLIT_CODE = re.compile(r'^((?:PL|CB)\d{8,})$', re.I)
+FNO_TABLE_PACKAGE_RE = re.compile(
+    r'^\s*(\d+)\s+((?:PL|CB)\d+)'
+    r'(?:\s+(PL|CB))?'
+    r'\s+(\d[\d,]*(?:\.\d+)?)'
+    r'\s+(\d[\d,]*(?:\.\d+)?)'
+    r'\s+(\d[\d,]*(?:\.\d+)?)'
+    r'\s+(\d[\d,]*(?:\.\d+)?)'
+    r'\s+(\d[\d,]*(?:\.\d+)?)'
+    r'\s+(\d[\d,]*(?:\.\d+)?)\s*$',
+    re.I,
+)
 CARTON_BOX_RE = re.compile(r'^Carton Box\s+(\d+)\s+(CB\d+)\s+(\d+(?:\.\d+)?)$', re.I)
 INVOICE_DATA_RE = re.compile(
     r'^([A-Z0-9-]+)'
@@ -66,6 +77,10 @@ def normalize_space(value: Any) -> str:
 
 def normalize_code(value: Any) -> str:
     return normalize_space(value).upper()
+
+
+def normalize_compact_code(value: Any) -> str:
+    return re.sub(r'\s+', '', str(value or '')).upper()
 
 
 def normalize_header(value: Any) -> str:
@@ -157,14 +172,29 @@ def infer_file_role(file_name: str, meta: Optional[Dict[str, Any]] = None) -> st
 def build_manifest_entries(input_dir: str, manifest: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not isinstance(manifest, dict):
         return []
+    input_root = os.path.realpath(input_dir)
     result: List[Dict[str, Any]] = []
     for raw in manifest.get('files') or []:
         if not isinstance(raw, dict):
             continue
         saved_path = normalize_space(raw.get('saved_path'))
         saved_name = normalize_space(raw.get('saved_name'))
-        path = saved_path or (os.path.join(input_dir, saved_name) if saved_name else '')
-        if not path or not os.path.exists(path):
+        candidate = (
+            saved_path
+            if saved_path and os.path.isabs(saved_path)
+            else os.path.join(input_root, saved_path or saved_name)
+            if saved_path or saved_name
+            else ''
+        )
+        path = os.path.realpath(candidate) if candidate else ''
+        try:
+            is_inside_input = (
+                bool(path)
+                and os.path.commonpath([input_root, path]) == input_root
+            )
+        except ValueError:
+            is_inside_input = False
+        if not is_inside_input or not os.path.isfile(path):
             continue
         result.append({
             'path': path,
@@ -185,6 +215,14 @@ def extract_pdf_lines(pdf_path: str) -> List[str]:
                 line = normalize_space(raw)
                 if line:
                     result.append(line)
+    return result
+
+
+def extract_pdf_tables(pdf_path: str) -> List[List[List[Any]]]:
+    result: List[List[List[Any]]] = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            result.extend(page.extract_tables() or [])
     return result
 
 
@@ -286,12 +324,125 @@ def annotate_component_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return rows
 
 
+def find_table_header(
+    table: Sequence[Sequence[Any]],
+    required_headers: Sequence[str],
+) -> Tuple[Optional[int], Dict[str, int]]:
+    for row_index, row in enumerate(table):
+        header_map: Dict[str, int] = {}
+        for column_index, cell in enumerate(row):
+            normalized = normalize_header(cell)
+            if normalized:
+                header_map[normalized] = column_index
+        if all(header in header_map for header in required_headers):
+            return row_index, header_map
+    return None, {}
+
+
+def parse_fno_invoice_tables(
+    tables: Sequence[Sequence[Sequence[Any]]],
+    shipment_key: str,
+    file_name: str,
+    original_name: str,
+    invoice_no: str,
+) -> List[Dict[str, Any]]:
+    required_headers = (
+        'itemno',
+        'description',
+        'unitquantity',
+        'unitpricebeforediscount',
+        'totalbeforediscount',
+        'discount',
+        'unitpriceafterdiscount',
+        'totalprice',
+        'producecountry',
+    )
+    result: List[Dict[str, Any]] = []
+
+    for table in tables:
+        header_index, header_map = find_table_header(table, required_headers)
+        if header_index is None:
+            continue
+
+        for raw_row in table[header_index + 1:]:
+            row = list(raw_row)
+
+            def value(header: str) -> Any:
+                column = header_map[header]
+                return row[column] if column < len(row) else None
+
+            index_text = normalize_space(row[0] if row else None)
+            index_match = re.fullmatch(r'(\d+)(?:\s+FOC)?', index_text, re.I)
+            if not index_match:
+                continue
+
+            item_no = normalize_compact_code(value('itemno'))
+            quantity = parse_decimal(value('unitquantity'))
+            if not item_no or quantity is None:
+                continue
+
+            total_before = parse_decimal(value('totalbeforediscount'))
+            total_after = parse_decimal(value('totalprice'))
+            discount = parse_decimal(value('discount'))
+            commercial_discount = (
+                total_before - total_after
+                if total_before is not None and total_after is not None
+                else None
+            )
+            is_foc = bool(
+                re.search(r'\bFOC\b', index_text, re.I)
+                or discount == Decimal('100')
+            )
+
+            result.append({
+                'itemIndex': int(index_match.group(1)),
+                'itemNo': item_no,
+                'description': normalize_space(value('description')),
+                'quantity': dec_to_num(quantity),
+                'unitPriceBeforeDiscount': dec_to_num(
+                    parse_decimal(value('unitpricebeforediscount'))
+                ),
+                'totalBeforeDiscount': dec_to_num(total_before),
+                'discountPercentage': dec_to_num(discount),
+                'unitPriceAfterDiscount': dec_to_num(
+                    parse_decimal(value('unitpriceafterdiscount'))
+                ),
+                'totalPriceAfterDiscount': dec_to_num(total_after),
+                'commercialDiscount': dec_to_num(commercial_discount),
+                'countryOfOrigin': normalize_space(value('producecountry')),
+                '__isFoc': is_foc,
+                '__sourceLayout': 'fno-table-2026',
+                '__sourceFileName': file_name,
+                '__sourceOriginalName': original_name,
+                '__shipmentKey': shipment_key,
+                '__invoiceNo': invoice_no,
+            })
+
+    return annotate_component_rows(result)
+
+
 def parse_invoice_pdf(entry: Dict[str, Any], shipment_key: str, warnings: List[str]) -> Tuple[str, List[Dict[str, Any]]]:
     pdf_path = entry['path']
     file_name = os.path.basename(pdf_path)
     original_name = entry.get('original_name') or file_name
     lines = extract_pdf_lines(pdf_path)
     invoice_no = extract_invoice_no(lines, file_name)
+
+    try:
+        table_rows = parse_fno_invoice_tables(
+            extract_pdf_tables(pdf_path),
+            shipment_key,
+            file_name,
+            original_name,
+            invoice_no,
+        )
+    except Exception as error:
+        table_rows = []
+        warnings.append(
+            f'[invoice] Не удалось прочитать табличный слой {file_name}: {error}'
+        )
+    if table_rows:
+        return invoice_no, table_rows
 
     rows: List[Dict[str, Any]] = []
 
@@ -424,10 +575,106 @@ def extract_desc_prefix(text: str) -> str:
     return clean_packing_description(re.split(r'[█▐▌]+', text)[0])
 
 
+def parse_fno_packing_tables(
+    tables: Sequence[Sequence[Sequence[Any]]],
+    shipment_key: str,
+    file_name: str,
+    original_name: str,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    current_package: Optional[str] = None
+    current_package_number: Optional[int] = None
+    current_package_type: Optional[str] = None
+    current_gross_weight: Optional[float] = None
+    current_net_weight: Optional[float] = None
+
+    for table in tables:
+        for raw_row in table:
+            row = list(raw_row)
+            if not row:
+                continue
+
+            first_cell = normalize_space(row[0])
+            package_match = FNO_TABLE_PACKAGE_RE.fullmatch(first_cell)
+            if package_match:
+                current_package_number = int(package_match.group(1))
+                current_package = normalize_compact_code(package_match.group(2))
+                current_package_type = normalize_code(
+                    package_match.group(3) or current_package[:2]
+                )
+                current_gross_weight = dec_to_num(
+                    parse_decimal(package_match.group(8))
+                )
+                current_net_weight = dec_to_num(
+                    parse_decimal(package_match.group(9))
+                )
+                continue
+
+            if current_package is None or len(row) < 6:
+                continue
+
+            item_no = normalize_compact_code(row[0])
+            if not re.fullmatch(r'[A-Z][A-Z0-9-]{3,}', item_no):
+                continue
+
+            quantity = parse_decimal(row[-4])
+            weight = parse_decimal(row[-2])
+            boxes = parse_decimal(row[-1])
+            if quantity is None or weight is None or boxes is None:
+                continue
+
+            barcode: Optional[str] = None
+            for cell in row[2:-4]:
+                candidate = normalize_space(cell)
+                if BARCODE_RE.fullmatch(candidate):
+                    barcode = candidate
+                    break
+
+            rows.append({
+                'itemNo': item_no,
+                'descriptionFromPacking': normalize_space(
+                    row[1] if len(row) > 1 else None
+                ),
+                'quantity': dec_to_num(quantity),
+                'weight': dec_to_num(weight),
+                'boxes': dec_to_num(boxes),
+                'barcode': barcode,
+                'pallet': current_package,
+                'sscc': current_package,
+                'packageNumber': current_package_number,
+                'packageType': current_package_type,
+                'packageGrossWeight': current_gross_weight,
+                'packageNetWeight': current_net_weight,
+                'nestedInCb': None,
+                '__sourceLayout': 'fno-table-2026',
+                '__sourceFileName': file_name,
+                '__sourceOriginalName': original_name,
+                '__shipmentKey': shipment_key,
+            })
+
+    return rows
+
+
 def parse_packing_pdf(entry: Dict[str, Any], shipment_key: str, warnings: List[str]) -> List[Dict[str, Any]]:
     pdf_path = entry['path']
     file_name = os.path.basename(pdf_path)
     original_name = entry.get('original_name') or file_name
+
+    try:
+        table_rows = parse_fno_packing_tables(
+            extract_pdf_tables(pdf_path),
+            shipment_key,
+            file_name,
+            original_name,
+        )
+    except Exception as error:
+        table_rows = []
+        warnings.append(
+            f'[packing] Не удалось прочитать табличный слой {file_name}: {error}'
+        )
+    if table_rows:
+        return table_rows
+
     lines = extract_pdf_lines(pdf_path)
 
     rows: List[Dict[str, Any]] = []
@@ -694,13 +941,34 @@ def parse_batch_xlsx(entry: Dict[str, Any], shipment_key: str, warnings: List[st
         return []
 
     worksheet = workbook[workbook.sheetnames[0]]
-    rows_iter = worksheet.iter_rows(values_only=True)
-    headers = next(rows_iter, None)
-    if not headers:
+    all_rows = list(worksheet.iter_rows(values_only=True))
+    if not all_rows:
         warnings.append(f'[batch] Пустой batch файл: {file_name}')
         return []
 
-    header_map = {normalize_header(header): index for index, header in enumerate(headers) if header is not None}
+    header_index: Optional[int] = None
+    header_map: Dict[str, int] = {}
+    layout = ''
+    for index, candidate in enumerate(all_rows):
+        candidate_map = {
+            normalize_header(header): column
+            for column, header in enumerate(candidate)
+            if header is not None
+        }
+        if {'containerid1', 'itemid1', 'qty'}.issubset(candidate_map):
+            header_index = index
+            header_map = candidate_map
+            layout = 'fno-technical'
+            break
+        if {'sapitemcode', 'batchnum'}.issubset(candidate_map):
+            header_index = index
+            header_map = candidate_map
+            layout = 'legacy'
+            break
+
+    if header_index is None:
+        warnings.append(f'[batch] Не найдена строка заголовков в {file_name}')
+        return []
 
     def get_value(row: Sequence[Any], *header_names: str) -> Any:
         for header_name in header_names:
@@ -709,8 +977,43 @@ def parse_batch_xlsx(entry: Dict[str, Any], shipment_key: str, warnings: List[st
                 return row[idx]
         return None
 
+    def optional_text(value: Any) -> Optional[str]:
+        text = normalize_space(value)
+        if not text or text.upper() in {'N/A', 'NA', 'NONE', '-'}:
+            return None
+        return text
+
     result: List[Dict[str, Any]] = []
-    for row in rows_iter:
+    for row in all_rows[header_index + 1:]:
+        if layout == 'fno-technical':
+            item_no = normalize_compact_code(get_value(row, 'ItemId1'))
+            quantity = dec_to_num(parse_decimal(get_value(row, 'Qty')))
+            if not item_no or quantity is None:
+                continue
+
+            kit_component = optional_text(get_value(row, 'KitItemName'))
+            is_kit_component = bool(kit_component)
+            result.append({
+                'itemNo': item_no,
+                'wmsItemCode': '',
+                'itemFrgnName': normalize_space(get_value(row, 'ItemName2')),
+                'quantity': quantity,
+                'quantityUnit': 'pieces' if is_kit_component else 'boxes',
+                'boxes': None if is_kit_component else quantity,
+                'batchNo': optional_text(get_value(row, 'InventBatchId')),
+                'kitBatchNo': optional_text(get_value(row, 'KitInventBatchId')),
+                'kitComponentDescription': kit_component,
+                'prodDate': format_excel_date(get_value(row, 'ProdDate')),
+                'expDate': format_excel_date(get_value(row, 'ExpDate')),
+                'barcode': gtin_text(get_value(row, 'ItemBarCode3')),
+                'pallet': optional_text(get_value(row, 'ContainerId1')),
+                '__sourceLayout': 'fno-technical-2026',
+                '__sourceFileName': file_name,
+                '__sourceOriginalName': original_name,
+                '__shipmentKey': shipment_key,
+            })
+            continue
+
         sap_item_code = get_value(row, 'SAP ItemCode', 'sapitemcode')
         item_no = normalize_code(sap_item_code)
         if not item_no:
@@ -720,7 +1023,8 @@ def parse_batch_xlsx(entry: Dict[str, Any], shipment_key: str, warnings: List[st
             'wmsItemCode': normalize_space(get_value(row, 'WMS ItemCode', 'wmsitemcode')),
             'itemFrgnName': normalize_space(get_value(row, 'ItemFrgnName', 'itemfrgnname')),
             'quantity': dec_to_num(parse_decimal(get_value(row, 'Quantity', 'quantity'))),
-            'batchNo': normalize_space(get_value(row, 'BatchNum', 'batchnum')),
+            'quantityUnit': 'pieces',
+            'batchNo': optional_text(get_value(row, 'BatchNum', 'batchnum')),
             'prodDate': format_excel_date(get_value(row, 'BatchProdDate', 'batchproddate')),
             'expDate': format_excel_date(get_value(row, 'BatchExpDate', 'batchexpdate')),
             'barcode': gtin_text(get_value(row, 'Barcode', 'barcode')),
@@ -732,6 +1036,109 @@ def parse_batch_xlsx(entry: Dict[str, Any], shipment_key: str, warnings: List[st
     if not result:
         warnings.append(f'[batch] Не удалось распарсить строки batch: {file_name}')
     return result
+
+
+def convert_batch_box_quantities_to_pieces(
+    batch_rows: List[Dict[str, Any]],
+    packing_rows: Sequence[Dict[str, Any]],
+    warnings: List[str],
+) -> None:
+    packing_groups: Dict[Tuple[str, str], Dict[str, float]] = {}
+    for row in packing_rows:
+        item_no = normalize_compact_code(row.get('itemNo'))
+        quantity = dec_to_num(parse_decimal(row.get('quantity')))
+        boxes_value = row.get('boxes')
+        boxes = (
+            0.0
+            if boxes_value in (0, 0.0, '0', '0.0')
+            else dec_to_num(parse_decimal(boxes_value))
+        )
+        identifiers = {
+            normalize_space(row.get('sscc')),
+            normalize_space(row.get('nestedInCb')),
+            normalize_space(row.get('pallet')),
+        }
+        identifiers.discard('')
+        if (
+            not item_no
+            or not identifiers
+            or quantity is None
+            or boxes is None
+        ):
+            continue
+        for identifier in identifiers:
+            group = packing_groups.setdefault(
+                (item_no, identifier),
+                {'quantity': 0.0, 'boxes': 0.0},
+            )
+            group['quantity'] += float(quantity)
+            group['boxes'] += float(boxes)
+
+    batch_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for row in batch_rows:
+        if row.get('quantityUnit') != 'boxes':
+            continue
+        item_no = normalize_compact_code(row.get('itemNo'))
+        pallet = normalize_space(row.get('pallet'))
+        if item_no and pallet:
+            batch_groups.setdefault((item_no, pallet), []).append(row)
+
+    for key, rows in batch_groups.items():
+        packing = packing_groups.get(key)
+        batch_quantity = sum(
+            dec_to_num(parse_decimal(row.get('quantity'))) or 0.0
+            for row in rows
+        )
+        if not packing or batch_quantity <= 0:
+            warnings.append(
+                f'[batch] Не удалось сопоставить batch с packing для '
+                f'{key[0]}, паллета {key[1]}'
+            )
+            continue
+
+        if abs(packing['quantity'] - batch_quantity) <= 0.01:
+            allocated_boxes = 0.0
+            for row_index, row in enumerate(rows):
+                pieces = float(
+                    dec_to_num(parse_decimal(row.get('quantity'))) or 0.0
+                )
+                if row_index == len(rows) - 1:
+                    row_boxes = packing['boxes'] - allocated_boxes
+                else:
+                    row_boxes = round(
+                        packing['boxes'] * pieces / batch_quantity,
+                        6,
+                    )
+                    allocated_boxes += row_boxes
+                row['quantity'] = pieces
+                row['boxes'] = float(row_boxes)
+                row['quantityUnit'] = 'pieces'
+            continue
+
+        if abs(packing['boxes'] - batch_quantity) > 0.01:
+            warnings.append(
+                f'[batch] Количество batch ({batch_quantity:g}) не совпадает '
+                f'ни с pieces ({packing["quantity"]:g}), ни с boxes '
+                f'({packing["boxes"]:g}) для {key[0]}, паллета {key[1]}'
+            )
+            continue
+
+        converted_total = 0.0
+        for row_index, row in enumerate(rows):
+            row_boxes = (
+                dec_to_num(parse_decimal(row.get('quantity'))) or 0.0
+            )
+            if row_index == len(rows) - 1:
+                pieces = packing['quantity'] - converted_total
+            else:
+                pieces = round(
+                    packing['quantity'] * row_boxes / batch_quantity,
+                    6,
+                )
+                converted_total += pieces
+            row['quantity'] = float(pieces)
+            row['boxes'] = float(row_boxes)
+            row['quantityUnit'] = 'pieces'
 
 
 def discover_file_entries(input_dir: str, shipment_key: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
@@ -781,10 +1188,13 @@ def discover_file_entries(input_dir: str, shipment_key: str) -> Tuple[List[Dict[
 
             if shipment_key in file_name:
                 if lower.endswith('.pdf'):
-                    if 'pack list' in lower or re.search(r'\bpac\b', lower):
+                    if 'pack' in lower or re.search(r'\bpac\b', lower):
                         packing_entries.append(base_entry)
                         continue
-                    if lower.startswith(f'{shipment_key.lower()}-') or 'invoice' in lower:
+                    if (
+                        lower.startswith(shipment_key.lower())
+                        or 'invoice' in lower
+                    ):
                         invoice_entries.append(base_entry)
                         continue
                 if lower.endswith(('.xlsx', '.xls')):
@@ -845,6 +1255,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     batch_rows: List[Dict[str, Any]] = []
     for entry in batch_entries:
         batch_rows.extend(parse_batch_xlsx(entry, shipment_key, warnings))
+    convert_batch_box_quantities_to_pieces(
+        batch_rows,
+        packing_rows,
+        warnings,
+    )
 
     if not invoice_rows:
         warnings.append(f'[validate] По поставке {shipment_key} не распознано ни одной строки invoice')

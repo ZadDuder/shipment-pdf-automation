@@ -13,7 +13,8 @@ Sheets.
 
 - `bot/` — Telegram-бот и systemd unit.
 - `пайтон скрипт/` — bundle-парсеры документов.
-- `workflows/*.js` — поддерживаемые исходники MOIL Code-нод для n8n.
+- `workflows/*.js` — поддерживаемые исходники MOIL и MOROCCANOIL Code-нод
+  для n8n.
 - `scripts/sync_moil_workflow_export.py` — синхронизация этих исходников и
   Google Sheets batch API-нод с `final.json`.
 - `final.json` — экспорт workflow n8n; перед импортом сверять с production.
@@ -34,8 +35,9 @@ python -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-Тесты `workflows/build_moil.js` дополнительно требуют Node.js 20+. Без Node они
-будут явно отмечены как skipped.
+Тесты `workflows/build_moil.js` и `workflows/build_moroccanoil.js`
+дополнительно требуют Node.js 20+. Без Node они будут явно отмечены как
+skipped.
 
 Ручной запуск MOIL-парсера:
 
@@ -54,6 +56,31 @@ packing и не более одного общего batch-файла. Резу�
 сначала строка набора для конкретной паллеты, затем его компоненты в порядке
 invoice и с количеством этой паллеты. Денежные суммы остаются только на
 строке самого набора.
+
+Ручной запуск MOROCCANOIL-парсера:
+
+```bash
+.venv/bin/python "пайтон скрипт/parse_moroccanoil_bundle.py" \
+  --shipment-key ILSO000003204 \
+  --input-dir /path/to/shipment \
+  --pretty
+```
+
+Новый формат MOROCCANOIL от июля 2026 обрабатывается отдельным комплектом на
+каждый `ILSO`: один invoice PDF, один `MO Packing Slip ...pdf` и, если товар
+маркируется, batch XLSX. PDF читается по табличному слою; количество batch
+автоматически определяется как коробки или штуки через сопоставление
+SKU+паллета с packing. Неполные комплекты не следует объединять с полными.
+
+Сквозная проверка трёх эталонных комплектов выполняется Node-скриптом:
+
+```bash
+node scripts/verify_moroccanoil_build.js \
+  workflows/build_moroccanoil.js \
+  /tmp/ILSO000003204-bundle.json \
+  /tmp/ILSO000000570-bundle.json \
+  /tmp/ILSO000000580-bundle.json
+```
 
 ## Production
 
