@@ -73,6 +73,77 @@ def test_manifest_cannot_reference_files_outside_shipment_directory(
     assert [Path(entry["path"]).name for entry in entries] == [inside.name]
 
 
+def test_manifest_preserves_double_spaces_without_allowing_path_escape(
+    moroccanoil_parser, tmp_path
+):
+    shipment_dir = tmp_path / "shipment"
+    shipment_dir.mkdir()
+    inside = shipment_dir / "MO  Packing Slip ILSO000004437.pdf"
+    outside = tmp_path / "outside  invoice.pdf"
+    inside.touch()
+    outside.touch()
+    manifest = {
+        "files": [
+            {
+                "saved_path": inside.name,
+                "saved_name": inside.name,
+                "doc_type": "pac",
+            },
+            {
+                "saved_path": str(outside),
+                "saved_name": outside.name,
+                "doc_type": "inv",
+            },
+        ]
+    }
+
+    entries = moroccanoil_parser.build_manifest_entries(
+        str(shipment_dir), manifest
+    )
+
+    assert [entry["path"] for entry in entries] == [str(inside.resolve())]
+    assert entries[0]["saved_name"] == inside.name
+
+
+def test_discovery_does_not_reintroduce_rejected_symlink_from_fallback(
+    moroccanoil_parser, tmp_path
+):
+    shipment = "SAFE"
+    shipment_dir = tmp_path / "shipment"
+    shipment_dir.mkdir()
+    outside = tmp_path / f"moroccanoil-inv-{shipment}-1.pdf"
+    outside.touch()
+    symlink = shipment_dir / outside.name
+    try:
+        symlink.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"symlinks are unavailable: {error}")
+    (shipment_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "saved_name": symlink.name,
+                        "doc_type": "inv",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    invoices, packings, batches, manifest_path = (
+        moroccanoil_parser.discover_file_entries(
+            str(shipment_dir), shipment
+        )
+    )
+
+    assert invoices == []
+    assert packings == []
+    assert batches == []
+    assert manifest_path == str(shipment_dir / "manifest.json")
+
+
 def test_fno_invoice_table_parses_wrapped_skus_and_foc(
     moroccanoil_parser, monkeypatch, tmp_path
 ):
@@ -143,6 +214,81 @@ def test_fno_invoice_table_parses_wrapped_skus_and_foc(
     assert all(row["__isFoc"] is True for row in rows)
     assert rows[0]["commercialDiscount"] == 842.4
     assert rows[1]["countryOfOrigin"] == "Italy"
+
+
+def test_fno_invoice_text_fallback_parses_wrapped_sku_when_tables_are_empty(
+    moroccanoil_parser, monkeypatch, tmp_path
+):
+    invoice_path = tmp_path / "ILSO000004437-126018816 new.pdf"
+    invoice_path.touch()
+    lines = [
+        "Invoice No 126018816",
+        (
+            "1 FOC M408BVPW Blonde Voyage Powder Lightener "
+            "6 16.00 $ 96 $ 100.00% 0.00 $ 0.00 $ Italy"
+        ),
+        "7L750 7 levels",
+    ]
+    monkeypatch.setattr(
+        moroccanoil_parser,
+        "extract_pdf_lines",
+        lambda _: lines,
+    )
+    monkeypatch.setattr(
+        moroccanoil_parser,
+        "extract_pdf_tables",
+        lambda _: [],
+    )
+
+    warnings: list[str] = []
+    invoice_no, rows = moroccanoil_parser.parse_invoice_pdf(
+        _entry(invoice_path), "ILSO000004437", warnings
+    )
+
+    assert warnings == []
+    assert invoice_no == "126018816"
+    assert len(rows) == 1
+    assert rows[0]["itemNo"] == "M408BVPW7L750"
+    assert rows[0]["quantity"] == 6
+    assert rows[0]["totalBeforeDiscount"] == 96
+    assert rows[0]["totalPriceAfterDiscount"] == 0
+    assert rows[0]["commercialDiscount"] == 96
+    assert rows[0]["countryOfOrigin"] == "Italy"
+    assert rows[0]["__isFoc"] is True
+
+
+def test_fno_invoice_text_fallback_keeps_repeated_one_character_sku_suffix(
+    moroccanoil_parser, monkeypatch, tmp_path
+):
+    invoice_path = tmp_path / "invoice.pdf"
+    invoice_path.touch()
+    monkeypatch.setattr(
+        moroccanoil_parser,
+        "extract_pdf_lines",
+        lambda _: [
+            "Invoice No 126018817",
+            (
+                "1 M105THL10 Thickening Lotion "
+                "360 5.44 $ 1958.4 $ 5.00% 5.17 $ 1,860.48 $ Israel"
+            ),
+            "0 100ml",
+        ],
+    )
+    monkeypatch.setattr(
+        moroccanoil_parser,
+        "extract_pdf_tables",
+        lambda _: [],
+    )
+
+    warnings: list[str] = []
+    _, rows = moroccanoil_parser.parse_invoice_pdf(
+        _entry(invoice_path), "ILSO000004438", warnings
+    )
+
+    assert warnings == []
+    assert len(rows) == 1
+    assert rows[0]["itemNo"] == "M105THL100"
+    assert rows[0]["description"] == "Thickening Lotion 100ml"
 
 
 def test_fno_packing_table_uses_columns_not_numbers_in_description(
@@ -534,6 +680,34 @@ def test_real_fno_complete_sets(
         assert clay["quantity"] == 60
     if shipment in {"ILSO000000570", "ILSO000000580"}:
         assert all(row["__isFoc"] is True for row in invoice_rows)
+
+
+@pytest.mark.skipif(not REAL_DATA_DIR.exists(), reason="real supplier package absent")
+def test_real_fno_invoice_text_fallback_when_tables_are_missing(moroccanoil_parser):
+    invoice_path = REAL_DATA_DIR / "ILSO000004437-126018816 new.pdf"
+    warnings: list[str] = []
+
+    parsed_invoice_no, invoice_rows = moroccanoil_parser.parse_invoice_pdf(
+        _entry(invoice_path), "ILSO000004437", warnings
+    )
+
+    assert warnings == []
+    assert parsed_invoice_no == "126018816"
+    assert len(invoice_rows) == 1
+    row = invoice_rows[0]
+    assert row["itemIndex"] == 1
+    assert row["itemNo"] == "M408BVPW7L750"
+    assert row["description"] == "Blonde Voyage Powder Lightener 7 levels"
+    assert row["quantity"] == 6
+    assert row["unitPriceBeforeDiscount"] == 16
+    assert row["totalBeforeDiscount"] == 96
+    assert row["discountPercentage"] == 100
+    assert row["unitPriceAfterDiscount"] == 0
+    assert row["totalPriceAfterDiscount"] == 0
+    assert row["commercialDiscount"] == 96
+    assert row["countryOfOrigin"] == "Italy"
+    assert row["__isFoc"] is True
+    assert row["__sourceLayout"] == "fno-text-2026"
 
 
 @pytest.mark.skipif(not LEGACY_DATA_DIR.exists(), reason="legacy fixture absent")

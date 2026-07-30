@@ -48,6 +48,19 @@ INVOICE_DATA_RE = re.compile(
     r'\s+\$\s+(\d[\d,]*\.\d+)'
     r'\s+\$\s+([A-Za-z]+)$'
 )
+FNO_INVOICE_TEXT_ROW_RE = re.compile(
+    r'^(\d{1,3})\s+'
+    r'(?:(FOC)\s+)?'
+    r'([A-Z0-9-]+)\s+'
+    r'(.+?)\s+'
+    r'(\d[\d,]*)\s+'
+    r'(\d[\d,]*(?:\.\d+)?)\s+\$\s+'
+    r'(\d[\d,]*(?:\.\d+)?)\s+\$\s+'
+    r'(\d+(?:\.\d+)?)%\s+'
+    r'(\d[\d,]*(?:\.\d+)?)\s+\$\s+'
+    r'(\d[\d,]*(?:\.\d+)?)\s+\$\s+'
+    r'(.+)$'
+)
 INVOICE_ROW_SINGLE_RE = re.compile(
     r'^([A-Z0-9-]+)\s+(\d+)\s+(\d[\d,]*)\s+(\d+(?:\.\d+)?)%'
     r'\s+(.+?)\s+(\d[\d,]*\.\d+)\s+\$\s+(\d[\d,]*\.\d+)\s+\$\s+'
@@ -177,24 +190,38 @@ def build_manifest_entries(input_dir: str, manifest: Optional[Dict[str, Any]]) -
     for raw in manifest.get('files') or []:
         if not isinstance(raw, dict):
             continue
-        saved_path = normalize_space(raw.get('saved_path'))
-        saved_name = normalize_space(raw.get('saved_name'))
-        candidate = (
-            saved_path
-            if saved_path and os.path.isabs(saved_path)
-            else os.path.join(input_root, saved_path or saved_name)
-            if saved_path or saved_name
+        raw_saved_path = raw.get('saved_path')
+        raw_saved_name = raw.get('saved_name')
+        saved_path = (
+            raw_saved_path.strip()
+            if isinstance(raw_saved_path, str)
             else ''
         )
-        path = os.path.realpath(candidate) if candidate else ''
+        saved_name = (
+            raw_saved_name.strip()
+            if isinstance(raw_saved_name, str)
+            else ''
+        )
+        if saved_path:
+            candidate = (
+                saved_path
+                if os.path.isabs(saved_path)
+                else os.path.join(input_root, saved_path)
+            )
+        elif saved_name:
+            candidate = os.path.join(input_root, saved_name)
+        else:
+            continue
         try:
+            path = os.path.realpath(candidate)
             is_inside_input = (
                 bool(path)
                 and os.path.commonpath([input_root, path]) == input_root
             )
-        except ValueError:
-            is_inside_input = False
-        if not is_inside_input or not os.path.isfile(path):
+            is_file = os.path.isfile(path)
+        except (OSError, TypeError, ValueError):
+            continue
+        if not is_inside_input or not is_file:
             continue
         result.append({
             'path': path,
@@ -324,6 +351,158 @@ def annotate_component_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return rows
 
 
+def is_fno_sku_continuation_token(value: str) -> bool:
+    token = normalize_space(value)
+    if not re.fullmatch(r'[A-Z0-9-]{1,8}', token):
+        return False
+    if token in {'FOC', 'DG', 'NDG'}:
+        return False
+    if re.fullmatch(r'\d{2,4}(?:ML|MM|G|KG|OZ)', token):
+        return False
+    return True
+
+
+def parse_fno_invoice_text_rows(
+    lines: Sequence[str],
+    shipment_key: str,
+    file_name: str,
+    original_name: str,
+    invoice_no: str,
+    warnings: List[str],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    index = 0
+
+    while index < len(lines):
+        match = FNO_INVOICE_TEXT_ROW_RE.match(normalize_space(lines[index]))
+        if not match:
+            index += 1
+            continue
+
+        item_index = int(match.group(1))
+        is_foc = bool(match.group(2))
+        item_no = normalize_code(match.group(3))
+        description = normalize_space(match.group(4))
+        quantity = parse_decimal(match.group(5))
+        unit_before = parse_decimal(match.group(6))
+        total_before = parse_decimal(match.group(7))
+        discount_pct = parse_decimal(match.group(8))
+        unit_after = parse_decimal(match.group(9))
+        total_after = parse_decimal(match.group(10))
+        country = normalize_space(match.group(11))
+
+        suffix = ''
+        description_parts: List[str] = []
+        next_index = index + 1
+        first_content_line = True
+        while next_index < len(lines):
+            continuation = normalize_space(lines[next_index])
+            if not continuation:
+                next_index += 1
+                continue
+            if FNO_INVOICE_TEXT_ROW_RE.match(continuation):
+                break
+            if should_skip_invoice_line(continuation):
+                break
+            if continuation.lower().startswith(
+                (
+                    'shipment method:',
+                    'total tax',
+                    'total line',
+                    'document discount',
+                    'total after',
+                    'vat ',
+                    'total ',
+                    '[for customs',
+                )
+            ):
+                break
+
+            tokens = continuation.split()
+            if (
+                first_content_line
+                and tokens
+                and is_fno_sku_continuation_token(tokens[0])
+            ):
+                suffix = tokens.pop(0)
+            first_content_line = False
+
+            remaining: List[str] = []
+            for token in tokens:
+                digits = re.sub(r'\D', '', token)
+                if 8 <= len(digits) <= 14 and digits == token:
+                    continue
+                remaining.append(token)
+
+            if (
+                country.lower() == 'united'
+                and remaining
+                and remaining[-1].lower() == 'states'
+            ):
+                country = 'United States'
+                remaining.pop()
+            elif (
+                country.lower() == 'not'
+                and remaining
+                and remaining[-1].lower() == 'applicable'
+            ):
+                country = 'Not Applicable'
+                remaining.pop()
+
+            if remaining:
+                description_parts.append(' '.join(remaining))
+            next_index += 1
+
+        if suffix:
+            item_no = normalize_code(item_no + suffix)
+        if description_parts:
+            description = normalize_space(
+                f"{description} {' '.join(description_parts)}"
+            )
+
+        if item_no == 'DGR':
+            warnings.append(
+                f'[invoice] Пропущена служебная строка DGR в '
+                f'{file_name}, строка {item_index}'
+            )
+            index = max(next_index, index + 1)
+            continue
+
+        commercial_discount = None
+        if total_before is not None and total_after is not None:
+            commercial_discount = total_before - total_after
+
+        rows.append({
+            'itemIndex': item_index,
+            'itemNo': item_no,
+            'description': description,
+            'quantity': dec_to_num(quantity),
+            'unitPriceBeforeDiscount': dec_to_num(unit_before),
+            'totalBeforeDiscount': dec_to_num(total_before),
+            'discountPercentage': dec_to_num(discount_pct),
+            'unitPriceAfterDiscount': dec_to_num(unit_after),
+            'totalPriceAfterDiscount': dec_to_num(total_after),
+            'commercialDiscount': dec_to_num(commercial_discount),
+            'countryOfOrigin': country,
+            '__isFoc': is_foc,
+            '__sourceLayout': 'fno-text-2026',
+            '__sourceFileName': file_name,
+            '__sourceOriginalName': original_name,
+            '__shipmentKey': shipment_key,
+            '__invoiceNo': invoice_no,
+        })
+        index = max(next_index, index + 1)
+
+    seen_line_numbers = set()
+    for row_order, row in enumerate(rows, 1):
+        line_number = row.get('itemIndex')
+        row['__rowOrder'] = row_order
+        row['__isComponent'] = line_number in seen_line_numbers
+        seen_line_numbers.add(line_number)
+
+    return rows
+
+
 def find_table_header(
     table: Sequence[Sequence[Any]],
     required_headers: Sequence[str],
@@ -443,6 +622,17 @@ def parse_invoice_pdf(entry: Dict[str, Any], shipment_key: str, warnings: List[s
         )
     if table_rows:
         return invoice_no, table_rows
+
+    text_rows = parse_fno_invoice_text_rows(
+        lines,
+        shipment_key,
+        file_name,
+        original_name,
+        invoice_no,
+        warnings,
+    )
+    if text_rows:
+        return invoice_no, text_rows
 
     rows: List[Dict[str, Any]] = []
 
@@ -1144,6 +1334,7 @@ def convert_batch_box_quantities_to_pieces(
 def discover_file_entries(input_dir: str, shipment_key: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
     manifest_path, manifest = load_manifest(input_dir)
     manifest_entries = build_manifest_entries(input_dir, manifest)
+    input_root = os.path.realpath(input_dir)
 
     invoice_entries: List[Dict[str, Any]] = []
     packing_entries: List[Dict[str, Any]] = []
@@ -1167,7 +1358,16 @@ def discover_file_entries(input_dir: str, shipment_key: str) -> Tuple[List[Dict[
     for root, _, files in os.walk(input_dir):
         for file_name in files:
             lower = file_name.lower()
-            full_path = os.path.join(root, file_name)
+            candidate = os.path.join(root, file_name)
+            try:
+                full_path = os.path.realpath(candidate)
+                if (
+                    os.path.commonpath([input_root, full_path]) != input_root
+                    or not os.path.isfile(full_path)
+                ):
+                    continue
+            except (OSError, TypeError, ValueError):
+                continue
             base_entry = {
                 'path': full_path,
                 'saved_name': file_name,

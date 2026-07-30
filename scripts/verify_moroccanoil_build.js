@@ -42,6 +42,26 @@ const expected = {
     boxes: 0,
     weight: 28,
   },
+  ILSO000004437: {
+    customs: 1,
+    cz: 1,
+    quantity: 6,
+    before: 96,
+    after: 0,
+    discount: 96,
+    boxes: 0,
+    weight: 4.8,
+  },
+  ILSO000008323: {
+    customs: 1,
+    cz: 1,
+    quantity: 372,
+    before: 1365.24,
+    after: 1365.24,
+    discount: 0,
+    boxes: 31,
+    weight: 2.8427,
+  },
 };
 
 const sum = (rows, key) =>
