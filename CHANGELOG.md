@@ -34,6 +34,25 @@
   документами и итоговыми строками. Старый архивный комплект `8251014`
   продолжает распознаваться без изменений.
 
+### Production
+
+- Релиз установлен 2026-07-30 с timestamp `20260730T124949Z`.
+- Созданы резервные копии parser и SQLite n8n:
+  - `/data/moil/parse_moroccanoil_bundle.py.bak.moroc-fno-20260730T124949Z`;
+  - `/opt/n8n/.n8n/database.sqlite.backup-moroc-fno-20260730T124949Z`.
+- Установленный parser имеет SHA-256
+  `a1a8b939ff339b464f07f0db98bf9894983ae2e08fedd6d4fb1d2e4ea3ff487a`;
+  MOROCCANOIL build-нода —
+  `b4ccb951f6e058bf35db7ff53c3b5819f7c1ef279819cf1434b5d5f8b32813d2`.
+- `PRAGMA integrity_check = ok`, `n8n` и `tg-upload-bot` активны,
+  `/healthz` возвращает `{"status":"ok"}`.
+- Установленный parser через production virtualenv повторно обработал три
+  новых полных комплекта и старый `8251014`; все четыре прогона завершились
+  без предупреждений. Клиентские документы после smoke-теста удалены из
+  `/tmp`.
+- Тестовый webhook не вызывался, поэтому релиз не создавал и не изменял
+  клиентские Google Sheets и не отправлял Telegram-сообщения.
+
 ## 2026-07-28
 
 ### Исправлено

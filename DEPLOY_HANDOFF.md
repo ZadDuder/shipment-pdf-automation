@@ -93,6 +93,39 @@ Google credentials хранятся в n8n. Они не экспортируют
    - `boxes=0` остаётся нулём;
    - вес/коробки batch-строки относятся только к её паллете.
 
+### Статус релиза MOROCCANOIL F&O 2026-07-30
+
+- Релиз развёрнут с timestamp `20260730T124949Z`.
+- Backup parser:
+  `/data/moil/parse_moroccanoil_bundle.py.bak.moroc-fno-20260730T124949Z`.
+- Backup n8n SQLite:
+  `/opt/n8n/.n8n/database.sqlite.backup-moroc-fno-20260730T124949Z`.
+- SHA-256 установленного parser:
+  `a1a8b939ff339b464f07f0db98bf9894983ae2e08fedd6d4fb1d2e4ea3ff487a`.
+- SHA-256 ноды `Build Moroccanoil Customs and CZ Rows`:
+  `b4ccb951f6e058bf35db7ff53c3b5819f7c1ef279819cf1434b5d5f8b32813d2`;
+  `workflow_entity` совпадает с текущей записью `workflow_history`.
+- `PRAGMA integrity_check = ok`; `n8n` и `tg-upload-bot`: `active`;
+  `/healthz`: HTTP 200 / `{"status":"ok"}`.
+- Production parser через `/opt/moil-venv/bin/python` обработал без
+  предупреждений:
+  - `ILSO000003204`: 103 invoice / 103 packing / 105 batch;
+  - `ILSO000000570`: 2 invoice / 3 packing / 3 batch;
+  - `ILSO000000580`: 50 invoice / 50 packing / 50 batch;
+  - старый формат `8251014`: 88 invoice / 71 packing / 83 batch.
+- Node.js 20-проверка новых комплектов подтвердила:
+  - `003204`: 103 customs / 105 ЧЗ, quantity 7 848, boxes 220,
+    weight 919.902;
+  - `570`: 2 customs / 3 ЧЗ, quantity 948, boxes 20, FOC total 0;
+  - `580`: 50 customs / 50 ЧЗ, quantity 400, boxes 0, FOC total 0.
+- Первая попытка релиза была автоматически откачена защитным скриптом:
+  systemd уже сообщил `active`, но HTTP port ещё не открылся. После добавления
+  ожидания `/healthz` повторный релиз и все проверки прошли успешно.
+- Клиентские файлы и smoke-результаты удалены из `/tmp`. Webhook не
+  запускался, поэтому тест не изменял Google Sheets и не отправлял Telegram.
+- Локально: `40 passed`, `24 skipped` без Node.js; серверная Node.js-проверка
+  прошла. Повторный reviewer agent не нашёл blocker/high/medium замечаний.
+
 ## Правила секретов
 
 - Не коммитить `.env`, service-account JSON, production SQLite, клиентские
