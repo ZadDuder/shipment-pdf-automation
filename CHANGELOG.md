@@ -57,7 +57,7 @@
 - Созданы резервные копии parser и SQLite n8n:
   - `/data/moil/parse_moroccanoil_bundle.py.bak.moroc-fno-20260730T124949Z`;
   - `/opt/n8n/.n8n/database.sqlite.backup-moroc-fno-20260730T124949Z`.
-- Установленный parser имеет SHA-256
+- Parser базового F&O-релиза имел SHA-256
   `a1a8b939ff339b464f07f0db98bf9894983ae2e08fedd6d4fb1d2e4ea3ff487a`;
   MOROCCANOIL build-нода —
   `b4ccb951f6e058bf35db7ff53c3b5819f7c1ef279819cf1434b5d5f8b32813d2`.
@@ -69,6 +69,16 @@
   `/tmp`.
 - Тестовый webhook не вызывался, поэтому релиз не создавал и не изменял
   клиентские Google Sheets и не отправлял Telegram-сообщения.
+- Follow-up с текстовым fallback установлен с timestamp
+  `20260730T174511Z`. Backup parser:
+  `/data/moil/parse_moroccanoil_bundle.py.bak.text-fallback-20260730T174511Z`.
+  Текущий SHA-256 parser:
+  `8db54a051e596a0f75fa6a846d4fa40eafbfb82a877d6b0a34942e2661c6bbee`.
+- Установленный parser повторно обработал реальные `ILSO000004437`,
+  `ILSO000008323` и старый `8250699` без parser warnings. Для двух новых
+  комплектов production Node.js-проверка также подтвердила customs/ЧЗ.
+- В follow-up n8n workflow и SQLite не изменялись; `n8n` и
+  `tg-upload-bot` остались активны, `/healthz` вернул `{"status":"ok"}`.
 
 ## 2026-07-28
 

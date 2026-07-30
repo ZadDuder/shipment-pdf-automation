@@ -100,7 +100,7 @@ Google credentials хранятся в n8n. Они не экспортируют
   `/data/moil/parse_moroccanoil_bundle.py.bak.moroc-fno-20260730T124949Z`.
 - Backup n8n SQLite:
   `/opt/n8n/.n8n/database.sqlite.backup-moroc-fno-20260730T124949Z`.
-- SHA-256 установленного parser:
+- SHA-256 parser базового F&O-релиза:
   `a1a8b939ff339b464f07f0db98bf9894983ae2e08fedd6d4fb1d2e4ea3ff487a`.
 - SHA-256 ноды `Build Moroccanoil Customs and CZ Rows`:
   `b4ccb951f6e058bf35db7ff53c3b5819f7c1ef279819cf1434b5d5f8b32813d2`;
@@ -125,6 +125,34 @@ Google credentials хранятся в n8n. Они не экспортируют
   запускался, поэтому тест не изменял Google Sheets и не отправлял Telegram.
 - Локально: `40 passed`, `24 skipped` без Node.js; серверная Node.js-проверка
   прошла. Повторный reviewer agent не нашёл blocker/high/medium замечаний.
+
+#### Follow-up для text-only invoice
+
+- Установлен 2026-07-30 с timestamp `20260730T174511Z`; изменён только
+  `/data/moil/parse_moroccanoil_bundle.py`. n8n workflow и SQLite не
+  изменялись, перезапуск сервисов не потребовался.
+- Backup parser:
+  `/data/moil/parse_moroccanoil_bundle.py.bak.text-fallback-20260730T174511Z`.
+- Текущий SHA-256 установленного parser:
+  `8db54a051e596a0f75fa6a846d4fa40eafbfb82a877d6b0a34942e2661c6bbee`.
+- Production virtualenv обработал без parser warnings:
+  - `ILSO000004437`: 1 invoice / 1 packing, quantity 6, boxes 0,
+    weight 4.8;
+  - `ILSO000008323`: 1 invoice / 1 packing, quantity 372, boxes 31;
+  - старый `8250699`: 32 invoice / 49 packing / 36 batch,
+    invoice и packing quantity 1 440.
+- Node.js 20 на результатах production parser подтвердил:
+  - `ILSO000004437`: 1 customs / 1 ЧЗ, total before 96, total 0,
+    discount 96;
+  - `ILSO000008323`: 1 customs / 1 ЧЗ, total 1 365.24, boxes 31.
+- Локально: `45 passed`, `24 skipped` без Node.js; все пять новых
+  комплектов прошли серверный Node.js verifier. Reviewer agent сначала
+  нашёл два edge case — symlink fallback и повторяющийся однобуквенный
+  суффикс SKU; оба закрыты регрессиями, повторное ревью не нашло
+  blocker/high/medium замечаний.
+- `n8n` и `tg-upload-bot`: `active`; `/healthz`:
+  `{"status":"ok"}`. Webhook не запускался, поэтому клиентские таблицы и
+  Telegram не затрагивались.
 
 ## Правила секретов
 
