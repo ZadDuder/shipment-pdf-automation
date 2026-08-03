@@ -81,6 +81,11 @@ const detectMaster = (row) => {
     return null;
   };
 
+  const getAll = (...keys) =>
+    keys
+      .filter((key) => hasValue(row[key]))
+      .map((key) => row[key]);
+
   const textValues = Object.values(row)
     .filter((value) => typeof value === 'string' && value.trim());
 
@@ -106,6 +111,27 @@ const detectMaster = (row) => {
     )
   );
 
+  const itemNos = [
+    itemNo,
+    ...getAll(
+      'SKU',
+      'Item No.',
+      'itemNo',
+      'SKU Code - 2',
+      'SKU Code - 1',
+      'Old SKU',
+      'Old SKU FNO',
+      'Legacy SKU Code - 2',
+      'Артикул поставщика',
+      'Арт производителя',
+      'Артикул производителя',
+      'Vendor Code',
+      'ItemCode',
+      'SAP ItemCode'
+    ).map(normalizeCode),
+  ].filter(Boolean);
+  const uniqueItemNos = [...new Set(itemNos)];
+
   const gtin = gtinToText(
     get(
       'Код товара',
@@ -123,6 +149,7 @@ const detectMaster = (row) => {
 
   return {
     itemNo: itemNo || null,
+    itemNos: uniqueItemNos,
     article: get(
       'SKU RU',
       'Артикул',
@@ -198,8 +225,8 @@ for (const row of masterRows) {
   const normalized = detectMaster(row);
   if (!normalized) continue;
 
-  if (normalized.itemNo) {
-    masterByItemNo[normalized.itemNo] = normalized;
+  for (const itemNo of normalized.itemNos || []) {
+    masterByItemNo[itemNo] = normalized;
   }
 
   if (normalized.gtin) {

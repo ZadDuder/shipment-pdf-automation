@@ -294,3 +294,69 @@ def test_unmatched_batch_pallet_does_not_fall_back_to_all_packing():
     assert [row["Вес, кг"] for row in rows] == [None, None]
     assert [row["№ паллета"] for row in rows] == [None, None]
     assert all("не найдена в packing" in row["__warning_reason"] for row in rows)
+
+
+@pytest.mark.skipif(
+    shutil.which("node") is None,
+    reason="Node.js is required to execute the n8n Code node locally",
+)
+def test_master_catalog_resolves_new_and_legacy_sku_aliases():
+    item_codes = [
+        "M408BVCL400",
+        "HCVHC100GL",
+        "FMC-HCVHC100GL",
+    ]
+    bundle = {
+        "shipmentKey": "SKU-ALIASES",
+        "invoiceNo": "1",
+        "batchFiles": [],
+        "invoiceRows": [
+            {
+                "itemIndex": index,
+                "itemNo": item_no,
+                "description": "Blonde Voyage Clay Lightener",
+                "quantity": 1,
+                "unitPriceBeforeDiscount": 11.34,
+                "totalBeforeDiscount": 11.34,
+                "discountPercentage": 0,
+                "unitPriceAfterDiscount": 11.34,
+                "totalPriceAfterDiscount": 11.34,
+                "commercialDiscount": 0,
+                "countryOfOrigin": "Italy",
+            }
+            for index, item_no in enumerate(item_codes, 1)
+        ],
+        "packingRows": [
+            {
+                "itemNo": item_no,
+                "quantity": 1,
+                "weight": 0.425,
+                "boxes": 1,
+                "pallet": f"PL-{index}",
+            }
+            for index, item_no in enumerate(item_codes, 1)
+        ],
+        "batchRows": [],
+        "warnings": [],
+    }
+    master = [
+        {
+            "SKU Code - 1": "HCVHC100GL",
+            "SKU Code - 2": "M408BVCL400",
+            "Old SKU FNO": "HCVHC100GL",
+            "Legacy SKU Code - 2": "FMC-HCVHC100GL",
+            "АРТИКУЛ": "BVC400(146174)",
+            "GTIN": "7290113146174",
+            "Код ТНВЭД": "3305900009",
+            "Перевод": "ОСВЕТЛЯЮЩАЯ ГЛИНА ДЛЯ ВОЛОС",
+            "ОПИСАНИЕ УПАКОВКИ": "ПЛАСТИКОВЫЙ ПАКЕТ",
+            "страна происхождения": "ИТАЛИЯ",
+        }
+    ]
+
+    rows = run_build_node(bundle, master)["customsRows"]
+
+    assert [row["Item No."] for row in rows] == item_codes
+    assert all(row["Артикул"] == "BVC400(146174)" for row in rows)
+    assert all(row["__error_article"] is False for row in rows)
+    assert all(row["Перевод"] == "ОСВЕТЛЯЮЩАЯ ГЛИНА ДЛЯ ВОЛОС" for row in rows)
