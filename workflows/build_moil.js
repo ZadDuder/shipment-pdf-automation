@@ -67,6 +67,69 @@ const uniqSorted = (values) =>
 const round2 = (value) =>
   value === null || value === undefined ? null : Number(Number(value).toFixed(2));
 
+const scaleMoneyValue = (value, share = null) => {
+  const parsed = parseNumber(value);
+  if (parsed === null) return null;
+  return round2(share === null ? parsed : parsed * Number(share));
+};
+
+const componentMoneyFields = (row, share = null) => {
+  const discountPercentage = parseNumber(row.discountPercentage);
+  const totalAfterDiscount = parseNumber(row.totalPriceAfterDiscount);
+  const totalAfterSource = totalAfterDiscount === null
+    ? row.totalBeforeDiscount
+    : totalAfterDiscount;
+
+  return {
+    'Unit Price Before Discount': parseNumber(row.unitPriceBeforeDiscount),
+    'Total Before Discount': scaleMoneyValue(row.totalBeforeDiscount, share),
+    'Discount Percentage, %': discountPercentage === null
+      ? null
+      : `${Number(discountPercentage).toFixed(2)} %`,
+    'Unit Price After Discount': parseNumber(row.unitPriceAfterDiscount),
+    'Total,$': scaleMoneyValue(totalAfterSource, share),
+    'Commercial Discount, $': scaleMoneyValue(row.commercialDiscount, share),
+  };
+};
+
+const reconcileComponentMoneyTotals = (rows, sourceMoney, shares) => {
+  if (
+    !rows.length ||
+    rows.length !== shares.length ||
+    shares.some(
+      (share) => !hasValue(share) || !Number.isFinite(Number(share))
+    )
+  ) {
+    return rows;
+  }
+
+  const totalShare = shares.reduce((total, share) => total + Number(share), 0);
+  for (const field of [
+    'Total Before Discount',
+    'Total,$',
+    'Commercial Discount, $',
+  ]) {
+    const sourceValue = parseNumber(sourceMoney[field]);
+    if (sourceValue === null) continue;
+
+    const expectedTotal = round2(sourceValue * totalShare);
+    const actualTotal = round2(rows.reduce(
+      (total, row) => total + (parseNumber(row[field]) ?? 0),
+      0
+    ));
+    const remainder = round2(expectedTotal - actualTotal);
+    if (remainder === 0) continue;
+
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const currentValue = parseNumber(rows[index][field]);
+      if (currentValue === null) continue;
+      rows[index][field] = round2(currentValue + remainder);
+      break;
+    }
+  }
+  return rows;
+};
+
 const scalePackingBoxes = (boxes, scale = 1) => {
   if (boxes === null || boxes === undefined) return null;
   if (Number(boxes) === 0) return 0;
@@ -569,6 +632,14 @@ for (const row of aggregatedMainRows) {
   mainMap[row.itemNo] = row;
 }
 
+const batchRowsForComponent = (row, parentItemNo) => {
+  const describedBatchRows = componentBatchRowsFor(row, parentItemNo);
+  if (describedBatchRows.length) return describedBatchRows;
+
+  const itemNo = normalizeCode(row.itemNo);
+  return mainMap[itemNo] ? [] : regularBatchRowsForItem(itemNo);
+};
+
 const displaySequence = [];
 const emittedMain = new Set();
 const mainItemNoByIndex = new Map();
@@ -711,12 +782,7 @@ const buildComponentCustomsRow = (row) => {
     'Пояснения к материалу и упаковке': master?.packageDescription ?? '',
     'Country Of Origin': master?.countryOfOrigin || normalizeCountry(row.countryOfOrigin),
     'Quantity Количество': parseNumber(row.quantity),
-    'Unit Price Before Discount': null,
-    'Total Before Discount': null,
-    'Discount Percentage, %': null,
-    'Unit Price After Discount': null,
-    'Total,$': null,
-    'Commercial Discount, $': null,
+    ...componentMoneyFields(row),
     'Количество коробок, шт.': null,
     'Вес, кг': null,
     '№ паллета': null,
@@ -742,11 +808,7 @@ const buildComponentCzRows = (row, parentItemNo) => {
   const packageMissing = !hasValue(master?.packageDescription);
   const customsCodeText = hasValue(master?.customsCode) ? String(master.customsCode).trim() : null;
   const gtinText = gtinToText(master?.gtin);
-  const directBatchRows = regularBatchRowsForItem(itemNo);
-  const describedComponentRows = componentBatchRowsFor(row, parentItemNo);
-  const batchRowsForItem = describedComponentRows.length
-    ? describedComponentRows
-    : directBatchRows;
+  const batchRowsForItem = batchRowsForComponent(row, parentItemNo);
 
   const buildWarnings = (finalGtin) => {
     const warnings = [];
@@ -760,13 +822,18 @@ const buildComponentCzRows = (row, parentItemNo) => {
     return warnings;
   };
 
-  const makeRow = (batchRow) => {
+  const shareForBatch = (batchRow) => {
+    const baseQty = parseNumber(row.quantity) ?? 0;
+    const batchQty = batchRow ? batchRow.quantity : null;
+    return (baseQty && batchQty != null) ? batchQty / baseQty : null;
+  };
+
+  const makeRow = (batchRow, share = null) => {
     const finalGtin = gtinText || (batchRow?.barcode) || null;
     const rowWarnings = buildWarnings(finalGtin);
     const baseQty = parseNumber(row.quantity) ?? 0;
     const batchQty = batchRow ? batchRow.quantity : null;
     const qty = batchQty ?? (baseQty || null);
-    const share = (baseQty && batchQty != null) ? batchQty / baseQty : null;
 
     return {
       '#': null,
@@ -779,12 +846,7 @@ const buildComponentCzRows = (row, parentItemNo) => {
       'Пояснения к материалу и упаковке': master?.packageDescription ?? '',
       'Country Of Origin': master?.countryOfOrigin || normalizeCountry(row.countryOfOrigin),
       'Quantity Количество': qty,
-      'Unit Price Before Discount': null,
-      'Total Before Discount': null,
-      'Discount Percentage, %': null,
-      'Unit Price After Discount': null,
-      'Total,$': null,
-      'Commercial Discount, $': null,
+      ...componentMoneyFields(row, share),
       'Количество коробок, шт.': null,
       'Вес, кг': null,
       '№ паллета': null,
@@ -812,7 +874,15 @@ const buildComponentCzRows = (row, parentItemNo) => {
   };
 
   if (batchRowsForItem.length) {
-    return batchRowsForItem.map((b) => makeRow(b));
+    const shares = batchRowsForItem.map((batchRow) => shareForBatch(batchRow));
+    const rows = batchRowsForItem.map(
+      (batchRow, index) => makeRow(batchRow, shares[index])
+    );
+    return reconcileComponentMoneyTotals(
+      rows,
+      componentMoneyFields(row),
+      shares
+    );
   }
   return [makeRow(null)];
 };
@@ -915,14 +985,10 @@ const czRowsByEntry = new Map();
 
 for (const entry of displaySequence) {
   if (entry.type === 'component') {
-    const describedBatchRows = componentBatchRowsFor(
+    const componentBatchRowsForEntry = batchRowsForComponent(
       entry.row,
       entry.parentItemNo
     );
-    const directBatchRows = regularBatchRowsForItem(entry.itemNo);
-    const componentBatchRowsForEntry = describedBatchRows.length
-      ? describedBatchRows
-      : directBatchRows;
     const componentRows = buildComponentCzRows(
       entry.row,
       entry.parentItemNo
@@ -1289,13 +1355,36 @@ const allocateComponentRowsToBlocks = (parentResult, componentResult) => {
   if (!componentBatches.length) {
     const baseRow = componentRows[0];
     if (!baseRow) return allocations;
+    const allocatedRows = [];
+    const shares = [];
     for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
       const quantity = expectedQuantity(blocks[blockIndex]);
-      allocations[blockIndex].push({
+      const allocatedRow = {
         ...baseRow,
         'Quantity Количество': quantity ?? baseRow['Quantity Количество'],
-      });
+      };
+      if (quantity !== null && componentQuantity) {
+        const share = Number(quantity) / componentQuantity;
+        allocatedRow['Total Before Discount'] = scaleMoneyValue(
+          baseRow['Total Before Discount'],
+          share
+        );
+        allocatedRow['Total,$'] = scaleMoneyValue(
+          baseRow['Total,$'],
+          share
+        );
+        allocatedRow['Commercial Discount, $'] = scaleMoneyValue(
+          baseRow['Commercial Discount, $'],
+          share
+        );
+        shares.push(share);
+      } else {
+        shares.push(null);
+      }
+      allocations[blockIndex].push(allocatedRow);
+      allocatedRows.push(allocatedRow);
     }
+    reconcileComponentMoneyTotals(allocatedRows, baseRow, shares);
     return allocations;
   }
 

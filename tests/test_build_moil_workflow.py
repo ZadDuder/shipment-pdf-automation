@@ -76,7 +76,7 @@ def base_bundle(invoice_rows: list[dict]) -> dict:
     }
 
 
-def test_kit_components_are_visible_without_double_counting_money():
+def test_kit_components_keep_their_invoice_money():
     bundle = base_bundle(
         [
             {
@@ -100,10 +100,10 @@ def test_kit_components_are_visible_without_double_counting_money():
                 "quantity": 10,
                 "unitPriceBeforeDiscount": 4,
                 "totalBeforeDiscount": 40,
-                "discountPercentage": 0,
-                "unitPriceAfterDiscount": 4,
-                "totalPriceAfterDiscount": 40,
-                "commercialDiscount": 0,
+                "discountPercentage": 100,
+                "unitPriceAfterDiscount": 0,
+                "totalPriceAfterDiscount": 0,
+                "commercialDiscount": 40,
                 "__rowOrder": 2,
                 "__isComponent": True,
             },
@@ -120,13 +120,14 @@ def test_kit_components_are_visible_without_double_counting_money():
 
     assert [row["Item No."] for row in result["customsRows"]] == ["KIT1", "COMP1"]
     assert [row["#"] for row in result["customsRows"]] == [1, None]
-    component = result["customsRows"][1]
-    assert component["Quantity Количество"] == 10
-    assert component["Unit Price Before Discount"] is None
-    assert component["Total Before Discount"] is None
-    assert component["Unit Price After Discount"] is None
-    assert component["Total,$"] is None
-    assert component["Commercial Discount, $"] is None
+    for component in (result["customsRows"][1], result["czRows"][1]):
+        assert component["Quantity Количество"] == 10
+        assert component["Unit Price Before Discount"] == 4
+        assert component["Total Before Discount"] == 40
+        assert component["Discount Percentage, %"] == "100.00 %"
+        assert component["Unit Price After Discount"] == 0
+        assert component["Total,$"] == 0
+        assert component["Commercial Discount, $"] == 40
 
 
 def test_kit_component_batches_attach_by_component_description():
@@ -227,6 +228,12 @@ def test_kit_breakdown_is_repeated_directly_under_each_parent_pallet_row():
                 "itemNo": "BAGM26TRAVEL",
                 "description": "BAG For Travel Kit 2026",
                 "quantity": 976,
+                "unitPriceBeforeDiscount": 2.5,
+                "totalBeforeDiscount": 2440,
+                "discountPercentage": 50,
+                "unitPriceAfterDiscount": 1.25,
+                "totalPriceAfterDiscount": 1220,
+                "commercialDiscount": 1220,
                 "__invoiceNo": "126022812",
                 "__rowOrder": 2,
                 "__isComponent": True,
@@ -236,6 +243,12 @@ def test_kit_breakdown_is_repeated_directly_under_each_parent_pallet_row():
                 "itemNo": "M101UM25",
                 "description": "Moroccanoil Treatment Mist 25ml",
                 "quantity": 976,
+                "unitPriceBeforeDiscount": 3.27,
+                "totalBeforeDiscount": 3191.52,
+                "discountPercentage": 0,
+                "unitPriceAfterDiscount": 3.27,
+                "totalPriceAfterDiscount": 3191.52,
+                "commercialDiscount": 0,
                 "__invoiceNo": "126022812",
                 "__rowOrder": 3,
                 "__isComponent": True,
@@ -337,14 +350,108 @@ def test_kit_breakdown_is_repeated_directly_under_each_parent_pallet_row():
         for row in rows
         if row["Item No."] == "M101UM25"
     ) == 976
+    assert [
+        (
+            row["Unit Price Before Discount"],
+            row["Total Before Discount"],
+            row["Discount Percentage, %"],
+            row["Unit Price After Discount"],
+            row["Total,$"],
+            row["Commercial Discount, $"],
+        )
+        for row in rows
+        if row["Item No."] == "BAGM26TRAVEL"
+    ] == [
+        (2.5, 240, "50.00 %", 1.25, 120, 120),
+        (2.5, 1440, "50.00 %", 1.25, 720, 720),
+        (2.5, 760, "50.00 %", 1.25, 380, 380),
+    ]
+    assert [
+        (row["Total Before Discount"], row["Total,$"])
+        for row in rows
+        if row["Item No."] == "M101UM25"
+    ] == [
+        (313.92, 313.92),
+        (1883.52, 1883.52),
+        (994.08, 994.08),
+    ]
     assert all(
-        row["Total,$"] is None
-        and row["Количество коробок, шт."] is None
+        row["Количество коробок, шт."] is None
         and row["Вес, кг"] is None
         and row["№ паллета"] is None
         for row in rows
         if row["#"] is None
     )
+
+
+def test_component_split_assigns_rounding_remainder_to_final_block():
+    bundle = base_bundle(
+        [
+            {
+                "itemIndex": 1,
+                "itemNo": "KIT1",
+                "description": "Travel kit",
+                "quantity": 3,
+                "unitPriceBeforeDiscount": 10,
+                "totalBeforeDiscount": 30,
+                "discountPercentage": 0,
+                "unitPriceAfterDiscount": 10,
+                "totalPriceAfterDiscount": 30,
+                "commercialDiscount": 0,
+                "__rowOrder": 1,
+                "__isComponent": False,
+            },
+            {
+                "itemIndex": 1,
+                "itemNo": "COMP1",
+                "description": "Kit component",
+                "quantity": 3,
+                "unitPriceBeforeDiscount": 4,
+                "totalBeforeDiscount": 10,
+                "discountPercentage": 10,
+                "unitPriceAfterDiscount": 3.6,
+                "totalPriceAfterDiscount": 9,
+                "commercialDiscount": 1,
+                "__rowOrder": 2,
+                "__isComponent": True,
+            },
+        ]
+    )
+    bundle["packingRows"] = [
+        {
+            "itemNo": "KIT1",
+            "quantity": 1,
+            "boxes": 1,
+            "weight": 1,
+            "pallet": str(pallet),
+        }
+        for pallet in (1, 2, 3)
+    ]
+
+    result = run_build_node(
+        bundle,
+        [
+            master_row("KIT1", "1001", "7290000000001"),
+            master_row("COMP1", "1002", "7290000000002"),
+        ],
+    )
+
+    components = [
+        row for row in result["czRows"]
+        if row["Item No."] == "COMP1"
+    ]
+    assert [row["Quantity Количество"] for row in components] == [1, 1, 1]
+    assert [row["Total Before Discount"] for row in components] == [
+        3.33,
+        3.33,
+        3.34,
+    ]
+    assert [row["Total,$"] for row in components] == [3, 3, 3]
+    assert [row["Commercial Discount, $"] for row in components] == [
+        0.33,
+        0.33,
+        0.34,
+    ]
 
 
 def test_same_component_description_is_scoped_to_parent_kit():
@@ -968,10 +1075,16 @@ def test_same_sku_component_does_not_absorb_standalone_product_data():
                 "__isComponent": False,
             },
             {
-                "itemIndex": None,
+                "itemIndex": 1,
                 "itemNo": "M201HCM40",
                 "description": "Hand Cream kit component",
                 "quantity": 976,
+                "unitPriceBeforeDiscount": 2.81,
+                "totalBeforeDiscount": 2742.56,
+                "discountPercentage": 50,
+                "unitPriceAfterDiscount": 1.41,
+                "totalPriceAfterDiscount": 1371.28,
+                "commercialDiscount": 1371.28,
                 "__invoiceNo": "INV-A",
                 "__rowOrder": 2,
                 "__isComponent": True,
@@ -1002,6 +1115,16 @@ def test_same_sku_component_does_not_absorb_standalone_product_data():
             "pallet": "12",
         }
     ]
+    bundle["batchDocsCount"] = 1
+    bundle["batchFiles"] = ["standalone.xlsx"]
+    bundle["batchRows"] = [
+        {
+            "itemNo": "M201HCM40",
+            "quantity": 432,
+            "pallet": "12",
+            "batchNo": "STANDALONE-BATCH",
+        }
+    ]
 
     result = run_build_node(
         bundle,
@@ -1019,17 +1142,45 @@ def test_same_sku_component_does_not_absorb_standalone_product_data():
     component, standalone = hand_cream_rows
     assert component["#"] is None
     assert component["Quantity Количество"] == 976
-    assert component["Total Before Discount"] is None
-    assert component["Total,$"] is None
+    assert component["Unit Price Before Discount"] == 2.81
+    assert component["Total Before Discount"] == 2742.56
+    assert component["Discount Percentage, %"] == "50.00 %"
+    assert component["Unit Price After Discount"] == 1.41
+    assert component["Total,$"] == 1371.28
+    assert component["Commercial Discount, $"] == 1371.28
     assert component["Количество коробок, шт."] is None
     assert component["Вес, кг"] is None
 
     assert standalone["#"] == 2
     assert standalone["Quantity Количество"] == 432
+    assert standalone["Unit Price Before Discount"] == 2.81
     assert standalone["Total Before Discount"] == 1213.92
+    assert standalone["Discount Percentage, %"] == "0.00 %"
+    assert standalone["Unit Price After Discount"] == 2.81
     assert standalone["Total,$"] == 1213.92
+    assert standalone["Commercial Discount, $"] == 0
     assert standalone["Количество коробок, шт."] == 3
     assert standalone["Вес, кг"] == 25.92
+
+    hand_cream_cz_rows = [
+        row for row in result["czRows"]
+        if row["Item No."] == "M201HCM40"
+    ]
+    assert len(hand_cream_cz_rows) == 2
+    component_cz, standalone_cz = hand_cream_cz_rows
+    assert component_cz["#"] is None
+    assert component_cz["Quantity Количество"] == 976
+    assert component_cz["Total Before Discount"] == 2742.56
+    assert component_cz["Total,$"] == 1371.28
+    assert component_cz["Commercial Discount, $"] == 1371.28
+    assert component_cz["Batch No"] is None
+
+    assert standalone_cz["#"] == 2
+    assert standalone_cz["Quantity Количество"] == 432
+    assert standalone_cz["Total Before Discount"] == 1213.92
+    assert standalone_cz["Total,$"] == 1213.92
+    assert standalone_cz["Commercial Discount, $"] == 0
+    assert standalone_cz["Batch No"] == "STANDALONE-BATCH"
 
 
 @pytest.mark.parametrize(
