@@ -149,6 +149,88 @@ def test_fno_packing_layout_accepts_inline_barcode(
     assert rows[0]["boxes"] == 104
 
 
+def test_fno_packing_layout_accepts_st_column_and_prefixed_sscc(
+    moil_parser, monkeypatch, tmp_path
+):
+    packing_path = tmp_path / "packing-with-st.pdf"
+    packing_path.touch()
+    lines = [
+        "Packages content",
+        "Package Number SSCC Package Type Volume Height Width Length Gross weight Net weight",
+        "1 PL000006682 PL 1.116 0.93 1.00 1.20 432.18 415.18",
+        "Item Code ST Item description Barcode Qty Piece Weight Total box",
+        "M101OR100 EO Moroccanoil Treatment Original 1344 390.88 28",
+        "100ml 7290011521011",
+        "M110SHMR25 Moisture Repair Shampoo 250ml 36 11.50 1",
+        "0 7290011521196",
+        "M201DBO100 EO Dry Body Oil Spray 100ml 36 12.80 1",
+        "7290014344372",
+        "2 PL000006684 PL 1.824 1.52 1.00 1.20 706.08 689.08",
+        "Item Code ST Item description Barcode Qty Piece Weight Total box",
+        "MSECOND EE Second pallet aggregate 2292 689.08 61",
+        "3 PL000006690 PL 1.944 1.62 1.00 1.20 595.04 587.44",
+        "Item Code ST Item description Barcode Qty Piece Weight Total box",
+        "MTHIRD EE Third pallet aggregate 7036 587.44 67",
+    ]
+    monkeypatch.setattr(moil_parser, "extract_pdf_lines", lambda _: lines)
+
+    warnings: list[str] = []
+    rows = moil_parser.parse_packing_pdf(
+        _entry(packing_path), "126039125", warnings
+    )
+
+    assert warnings == []
+    assert [row["itemNo"] for row in rows] == [
+        "M101OR100",
+        "M110SHMR250",
+        "M201DBO100",
+        "MSECOND",
+        "MTHIRD",
+    ]
+    assert [row["descriptionFromPacking"] for row in rows] == [
+        "Moroccanoil Treatment Original 100ml",
+        "Moisture Repair Shampoo 250ml",
+        "Dry Body Oil Spray 100ml",
+        "Second pallet aggregate",
+        "Third pallet aggregate",
+    ]
+    assert [row["pallet"] for row in rows] == ["1", "1", "1", "2", "3"]
+    assert [row["sscc"] for row in rows] == [
+        "PL000006682",
+        "PL000006682",
+        "PL000006682",
+        "PL000006684",
+        "PL000006690",
+    ]
+    assert sum(row["quantity"] for row in rows) == 10744
+    assert sum(row["boxes"] for row in rows) == 158
+    assert sum(row["weight"] for row in rows) == 1691.7
+
+    batch_rows = [
+        {
+            "itemNo": "M101OR100",
+            "pallet": "PL000006682",
+            "quantity": 28,
+            "quantityUnit": "boxes",
+        },
+        {
+            "itemNo": "M110SHMR250",
+            "pallet": "PL000006682",
+            "quantity": 1,
+            "quantityUnit": "boxes",
+        },
+    ]
+    conversion_warnings: list[str] = []
+    moil_parser.convert_batch_box_quantities_to_pieces(
+        batch_rows, rows, conversion_warnings
+    )
+
+    assert conversion_warnings == []
+    assert [row["quantity"] for row in batch_rows] == [1344, 36]
+    assert [row["boxes"] for row in batch_rows] == [28, 1]
+    assert [row["quantityUnit"] for row in batch_rows] == ["pieces", "pieces"]
+
+
 def test_repeated_invoice_line_number_marks_kit_components(
     moil_parser, monkeypatch, tmp_path
 ):
@@ -291,6 +373,86 @@ def test_shipping_data_batch_layout_is_detected_and_forward_filled(
     assert [row["quantity"] for row in rows] == [67.0, 37.0]
     assert all(row["quantityUnit"] == "boxes" for row in rows)
     assert all(row["barcode"] == "7290016033601" for row in rows)
+
+
+def test_shipping_data_report_export_uses_shifted_technical_columns(
+    moil_parser, tmp_path
+):
+    batch_path = tmp_path / "shipping-report-export.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(["Textbox22", "Textbox27"])
+    worksheet.append(["Shipment Code SHIP0036522", "Load LOAD0035910"])
+    worksheet.append([])
+    worksheet.append(
+        [
+            "Textbox2", "Textbox17", "Textbox18", "Textbox20",
+            "Textbox1", "Textbox5", "Textbox9", "Textbox10",
+            "Textbox11", "Textbox12", "Textbox13", "Textbox14",
+            "Textbox3", "ContainerId1", "ItemId1", "ItemName2",
+            "ItemBarCode3", "KitInventBatchId", "KitItemName",
+            "InventBatchId", "ProdDate", "ExpDate", "PdsShelfLife",
+            "Qty", "BaseUnitQty",
+        ]
+    )
+    labels = [
+        "Pallet", "SKU", "Prod Name", "EAN", "Kit Batch No",
+        "Kit component", "Batch No", "Prod. date", "Exp. date",
+        "Shelf Life (days)", "Shelf Life Remaining (days)", "Qty", "Pcs",
+    ]
+    worksheet.append(
+        labels
+        + [
+            "PL000006682", "M101OR100",
+            "Moroccanoil Treatment Original 100ml", "7290011521011",
+            "N/A", "N/A", "14149OKY", "2025-11-06", "2029-05-07",
+            1278, 23, 1104,
+        ]
+    )
+    worksheet.append(
+        labels
+        + [
+            "PL000006682", "M101OR100",
+            "Moroccanoil Treatment Original 100ml", "7290011521011",
+            "N/A", "N/A", "14219OKY", "2025-11-25", "2029-05-26",
+            1278, 5, 240,
+        ]
+    )
+    workbook.save(batch_path)
+
+    warnings: list[str] = []
+    rows = moil_parser.parse_batch_xlsx(
+        _entry(batch_path), "126039125", warnings
+    )
+
+    assert warnings == []
+    assert [row["itemNo"] for row in rows] == ["M101OR100", "M101OR100"]
+    assert [row["pallet"] for row in rows] == [
+        "PL000006682", "PL000006682",
+    ]
+    assert [row["batchNo"] for row in rows] == ["14149OKY", "14219OKY"]
+    assert [row["quantity"] for row in rows] == [1104, 240]
+    assert [row["boxes"] for row in rows] == [23, 5]
+    assert [row["quantityUnit"] for row in rows] == ["pieces", "pieces"]
+    assert all(row["barcode"] == "7290011521011" for row in rows)
+
+    packing_rows = [
+        {
+            "itemNo": "M101OR100",
+            "sscc": "PL000006682",
+            "pallet": "1",
+            "quantity": 1344,
+            "boxes": 28,
+        }
+    ]
+    conversion_warnings: list[str] = []
+    moil_parser.convert_batch_box_quantities_to_pieces(
+        rows, packing_rows, conversion_warnings
+    )
+
+    assert conversion_warnings == []
+    assert [row["quantity"] for row in rows] == [1104, 240]
+    assert [row["boxes"] for row in rows] == [23, 5]
 
 
 def test_shipping_data_kit_components_are_piece_rows(moil_parser, tmp_path):

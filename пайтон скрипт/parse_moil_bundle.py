@@ -20,7 +20,7 @@ INVOICE_NO_RE = re.compile(r'Invoice No\.?\s*[:#]?\s*([0-9A-Za-z\-/]+)', re.I)
 PACKAGE_HEADER_RE_OLD = re.compile(r'^\s*(\d+)\s+\d+\s+PL\b')
 PACKAGE_HEADER_RE_NEW = re.compile(r'^\s*(\d+)\s+(?:PL|CB)\d+\s+(?:PL|CB)\b', re.I)
 FNO_PACKAGE_HEADER_RE = re.compile(
-    r'^\s*(\d+)\s+(\d+)\s+(PL|CB)\s+'
+    r'^\s*(\d+)\s+([A-Z0-9-]+)\s+(PL|CB)\s+'
     r'(\d[\d,]*(?:\.\d+)?)\s+'
     r'(\d[\d,]*(?:\.\d+)?)\s+'
     r'(\d[\d,]*(?:\.\d+)?)\s+'
@@ -39,6 +39,19 @@ FNO_PACKING_ROW_RE = re.compile(
     r'(?:(\d[\d,]*(?:\.\d+)?)\s+)?'
     r'(\d[\d,]*(?:\.\d+)?)\s+'
     r'(\d[\d,]*(?:\.\d+)?)\s*$'
+)
+FNO_PACKING_ROW_WITH_ST_RE = re.compile(
+    r'^([A-Z][A-Z0-9-]*)\s+[A-Z]{1,3}\s+(.+?)\s+'
+    r'(?:(\d{8,14})\s+)?'
+    r'(\d[\d,]*(?:\.\d+)?)\s+'
+    r'(?:(\d[\d,]*(?:\.\d+)?)\s+)?'
+    r'(\d[\d,]*(?:\.\d+)?)\s+'
+    r'(\d[\d,]*(?:\.\d+)?)\s*$'
+)
+FNO_PACKING_HEADER_RE = re.compile(
+    r'\bitem code(?:\s+st)?\s+item description\s+barcode\s+qty'
+    r'(?:\s+piece)?\s+weight\s+total box\b',
+    re.I,
 )
 FNO_INVOICE_ROW_RE = re.compile(
     r'^(\d{1,3})\s+'
@@ -587,6 +600,23 @@ def parse_fno_packing_rows(
     original_name: str,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    has_st_column = any(
+        re.search(r'\bitem code\s+st\s+item description\b', line, re.I)
+        for line in lines
+    )
+    row_patterns = (
+        (FNO_PACKING_ROW_WITH_ST_RE, FNO_PACKING_ROW_RE)
+        if has_st_column
+        else (FNO_PACKING_ROW_RE,)
+    )
+
+    def match_item_line(value: str) -> Optional[re.Match[str]]:
+        for pattern in row_patterns:
+            match = pattern.match(value)
+            if match:
+                return match
+        return None
+
     current_package: Optional[str] = None
     current_sscc: Optional[str] = None
     current_gross_weight: Optional[float] = None
@@ -604,7 +634,7 @@ def parse_fno_packing_rows(
             index += 1
             continue
 
-        item = FNO_PACKING_ROW_RE.match(line)
+        item = match_item_line(line)
         if not item:
             index += 1
             continue
@@ -625,7 +655,7 @@ def parse_fno_packing_rows(
             continuation = normalize_space(lines[next_index])
             if FNO_PACKAGE_HEADER_RE.match(continuation):
                 break
-            if FNO_PACKING_ROW_RE.match(continuation):
+            if match_item_line(continuation):
                 break
             if should_skip_packing_line(continuation):
                 break
@@ -706,8 +736,7 @@ def parse_packing_pdf(entry: Dict[str, Any], shipment_key: str, warnings: List[s
     lines = extract_pdf_lines(pdf_path)
 
     is_fno_layout = any(
-        'item code item description barcode qty piece weight total box'
-        in normalize_space(line).lower()
+        FNO_PACKING_HEADER_RE.search(normalize_space(line))
         for line in lines
     )
     if is_fno_layout:
@@ -870,6 +899,32 @@ def parse_batch_xlsx(entry: Dict[str, Any], shipment_key: str, warnings: List[st
             for column, header in enumerate(candidate)
             if header is not None
         }
+        technical_shipping_headers = {
+            'containerid1', 'itemid1', 'inventbatchid', 'qty', 'baseunitqty',
+        }
+        if technical_shipping_headers.issubset(candidate_map):
+            technical_aliases = {
+                'Pallet': 'ContainerId1',
+                'SKU': 'ItemId1',
+                'Prod Name': 'ItemName2',
+                'EAN': 'ItemBarCode3',
+                'Kit Batch No': 'KitInventBatchId',
+                'Kit component': 'KitItemName',
+                'Batch No': 'InventBatchId',
+                'Prod. date': 'ProdDate',
+                'Exp. date': 'ExpDate',
+                'Shelf Life (days)': 'PdsShelfLife',
+                'Qty': 'Qty',
+                'Pcs': 'BaseUnitQty',
+            }
+            header_index = index
+            header_map = {
+                normalize_header(alias): candidate_map[normalize_header(source)]
+                for alias, source in technical_aliases.items()
+                if normalize_header(source) in candidate_map
+            }
+            layout = 'shipping-data-report'
+            break
         if {'sapitemcode', 'batchnum'}.issubset(candidate_map):
             header_index = index
             header_map = candidate_map
@@ -899,7 +954,7 @@ def parse_batch_xlsx(entry: Dict[str, Any], shipment_key: str, warnings: List[st
     current_barcode: Optional[str] = None
 
     for row in all_rows[header_index + 1:]:
-        if layout == 'shipping-data':
+        if layout in {'shipping-data', 'shipping-data-report'}:
             current_pallet = normalize_space(get_value(row, 'Pallet')) or current_pallet
             current_item_no = normalize_sku(get_value(row, 'SKU')) or current_item_no
             current_description = normalize_space(get_value(row, 'Prod Name')) or current_description
@@ -913,14 +968,25 @@ def parse_batch_xlsx(entry: Dict[str, Any], shipment_key: str, warnings: List[st
             batch_no = normalize_space(get_value(row, 'Batch No'))
             if not current_item_no or not batch_no:
                 continue
-            quantity = dec_to_num(parse_decimal(get_value(row, 'Qty')))
+            box_quantity = dec_to_num(parse_decimal(get_value(row, 'Qty')))
+            piece_quantity = (
+                dec_to_num(parse_decimal(get_value(row, 'Pcs')))
+                if layout == 'shipping-data-report'
+                else None
+            )
+            quantity = piece_quantity if piece_quantity is not None else box_quantity
+            quantity_unit = (
+                'pieces'
+                if is_kit_component or piece_quantity is not None
+                else 'boxes'
+            )
             result.append({
                 'itemNo': current_item_no,
                 'wmsItemCode': '',
                 'itemFrgnName': current_description,
                 'quantity': quantity,
-                'quantityUnit': 'pieces' if is_kit_component else 'boxes',
-                'boxes': None if is_kit_component else quantity,
+                'quantityUnit': quantity_unit,
+                'boxes': None if is_kit_component else box_quantity,
                 'batchNo': batch_no,
                 'kitBatchNo': normalize_space(get_value(row, 'Kit Batch No')) or None,
                 'kitComponentDescription': kit_component if is_kit_component else None,
